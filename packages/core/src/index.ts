@@ -7,3 +7,4 @@ export * from './hash';
 export * from './merkle';
 export * from './signing';
 export * from './validation';
+export * from './event';

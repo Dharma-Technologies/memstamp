@@ -1,0 +1,15 @@
+## Codebase Patterns
+- Use `NODE_ENV=development` when running pnpm install, build, or test (env defaults to production)
+- Core package uses tsup for build, vitest for tests
+- Hash format is always `sha256:<64-hex-chars>`
+- Use Node.js built-in `crypto` for SHA-256, `@noble/ed25519` for signing
+- TypeScript strict mode is on — no `any`, explicit return types
+- Schema validation uses `ajv` with `ajv-formats`
+---
+
+## 2026-02-18 - Initial Setup
+- Project scaffolded with P11-01 stories 1-11 already implemented
+- Stories 12 (event creation), 13 (exports update), and 14 (comprehensive tests) remain
+- Existing tests pass (hash.test.ts — 7 tests)
+- TypeScript strict mode compiles cleanly
+---

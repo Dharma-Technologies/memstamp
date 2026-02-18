@@ -1,0 +1,91 @@
+{
+  "id": "P11-01",
+  "title": "Core Schema & Library",
+  "branchName": "main",
+  "stories": [
+    {
+      "id": "P11-01-01",
+      "title": "VCOT TypeScript Types",
+      "file": "packages/core/src/types.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-02",
+      "title": "JSON Schema Definition",
+      "file": "schemas/vcot-v1.json",
+      "passes": true
+    },
+    {
+      "id": "P11-01-03",
+      "title": "Canonical JSON Serialization",
+      "file": "packages/core/src/hash.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-04",
+      "title": "SHA-256 Hash Computation",
+      "file": "packages/core/src/hash.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-05",
+      "title": "Merkle Tree Construction",
+      "file": "packages/core/src/merkle.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-06",
+      "title": "Merkle Proof Generation",
+      "file": "packages/core/src/merkle.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-07",
+      "title": "Merkle Proof Verification",
+      "file": "packages/core/src/merkle.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-08",
+      "title": "Ed25519 Key Generation",
+      "file": "packages/core/src/signing.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-09",
+      "title": "Ed25519 Signing",
+      "file": "packages/core/src/signing.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-10",
+      "title": "Ed25519 Verification",
+      "file": "packages/core/src/signing.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-11",
+      "title": "VCOT Event Validation",
+      "file": "packages/core/src/validation.ts",
+      "passes": true
+    },
+    {
+      "id": "P11-01-12",
+      "title": "VCOT Event Creation Helper",
+      "file": "packages/core/src/event.ts",
+      "passes": false
+    },
+    {
+      "id": "P11-01-13",
+      "title": "Package Build & Exports",
+      "file": "packages/core/src/index.ts",
+      "passes": false
+    },
+    {
+      "id": "P11-01-14",
+      "title": "Comprehensive Test Suite",
+      "file": "packages/core/tests/",
+      "passes": false
+    }
+  ]
+}
