@@ -269,751 +269,950 @@ EVM_PRIVATE_KEY=xxx     # 0x prefixed
 
 ---
 
-## Current Stage: P11-04-chain-anchoring
+## Current Stage: P11-05-billing-sdk
 
-# P11-04: Chain Anchoring
+# P11-05: Billing & SDK
 
-**Phase 4 — Blockchain Integration**
+**Phase 5 — Credit System & Python SDK**
 
-Build the worker for background anchoring and implement chain adapters for Solana, EVM, and Bitcoin.
+Implement the credit billing system and build the Python SDK.
 
 ---
 
 ## Stories
 
-### Story 1: Worker Setup
-**File:** `packages/worker/src/index.ts`
+### Story 1: Credit Service
+**File:** `packages/api/src/services/credits.ts`
 
-Set up BullMQ worker to process anchor jobs.
-
-**Worker configuration:**
-```typescript
-import { Worker, Job } from 'bullmq';
-import IORedis from 'ioredis';
-
-const connection = new IORedis(config.redisUrl, {
-  maxRetriesPerRequest: null,
-});
-
-const worker = new Worker('anchor', async (job: Job) => {
-  switch (job.name) {
-    case 'anchor-batch':
-      return await processBatchAnchor(job.data);
-    case 'anchor-immediate':
-      return await processImmediateAnchor(job.data);
-    case 'verify-confirmation':
-      return await processConfirmationCheck(job.data);
-    default:
-      throw new Error(`Unknown job type: ${job.name}`);
-  }
-}, {
-  connection,
-  concurrency: 5,
-});
-
-worker.on('completed', (job, result) => {
-  console.log(`Job ${job.id} completed:`, result);
-});
-
-worker.on('failed', (job, err) => {
-  console.error(`Job ${job?.id} failed:`, err);
-});
-```
-
----
-
-### Story 2: Batch Anchor Processor
-**File:** `packages/worker/src/processors/batch.ts`
-
-Process batch anchor jobs.
-
-**Logic:**
-1. Fetch all pending stamps for the batch
-2. Group by chain preference
-3. Build Merkle tree from content hashes
-4. Create anchor record
-5. Submit to chain
-6. Update stamp statuses
-7. Queue confirmation check
+Implement credit management service.
 
 ```typescript
-async function processBatchAnchor(data: { stampIds?: string[] }): Promise<AnchorResult> {
-  // Get pending stamps (either specific IDs or by time window)
-  const stamps = data.stampIds 
-    ? await stampRepo.findByIds(data.stampIds)
-    : await stampRepo.findPendingForAnchoring(config.defaultChain, config.anchorBatchSize);
-  
-  if (stamps.length === 0) {
-    return { skipped: true, reason: 'No pending stamps' };
+export class CreditService {
+  // Get current balance
+  async getBalance(accountId: string): Promise<number> {
+    const account = await accountRepo.findById(accountId);
+    return account?.credits ?? 0;
   }
   
-  // Build Merkle tree
-  const leaves = stamps.map(s => s.contentHash);
-  const merkleRoot = computeMerkleRoot(leaves);
-  
-  // Create anchor record
-  const anchor = await anchorRepo.insert({
-    merkleRoot,
-    eventCount: stamps.length,
-    startTime: stamps[0].createdAt,
-    endTime: stamps[stamps.length - 1].createdAt,
-    chain: config.defaultChain,
-    status: 'pending',
-  });
-  
-  // Submit to chain
-  const chainAdapter = getChainAdapter(config.defaultChain);
-  const txHash = await chainAdapter.anchor(merkleRoot, stamps.length);
-  
-  // Update anchor with tx hash
-  await anchorRepo.update(anchor.id, { txHash });
-  
-  // Update stamps
-  await stampRepo.updateStatus(stamps.map(s => s.id), 'anchored', anchor.id);
-  
-  // Queue confirmation check
-  await confirmationQueue.add('check-confirmation', {
-    anchorId: anchor.id,
-    chain: config.defaultChain,
-    txHash,
-  }, { delay: 30000 }); // Check after 30 seconds
-  
-  return {
-    anchorId: anchor.id,
-    merkleRoot,
-    stampCount: stamps.length,
-    txHash,
-  };
-}
-```
-
----
-
-### Story 3: Chain Adapter Interface
-**File:** `packages/worker/src/chains/types.ts`
-
-Define the chain adapter interface.
-
-```typescript
-export interface ChainAdapter {
-  // Chain identifier
-  readonly chain: string;
-  
-  // Anchor a Merkle root
-  anchor(merkleRoot: string, eventCount: number): Promise<string>; // Returns tx hash
-  
-  // Check transaction status
-  getTransactionStatus(txHash: string): Promise<TransactionStatus>;
-  
-  // Get transaction details
-  getTransactionDetails(txHash: string): Promise<TransactionDetails>;
-  
-  // Verify a Merkle root is anchored
-  verifyAnchor(merkleRoot: string, txHash: string): Promise<boolean>;
-  
-  // Get current credit cost per stamp
-  getCreditCost(): Promise<number>;
-}
-
-export interface TransactionStatus {
-  confirmed: boolean;
-  finalized: boolean;
-  blockNumber?: number;
-  confirmations?: number;
-  error?: string;
-}
-
-export interface TransactionDetails {
-  txHash: string;
-  blockNumber: number;
-  timestamp: string;
-  merkleRoot: string;
-  eventCount: number;
-}
-
-export function getChainAdapter(chain: string): ChainAdapter {
-  switch (chain) {
-    case 'solana':
-      return new SolanaAdapter();
-    case 'base':
-    case 'ethereum':
-    case 'arbitrum':
-      return new EVMAdapter(chain);
-    case 'bitcoin':
-      return new BitcoinAdapter();
-    default:
-      throw new Error(`Unsupported chain: ${chain}`);
-  }
-}
-```
-
----
-
-### Story 4: Solana Adapter
-**File:** `packages/worker/src/chains/solana.ts`
-
-Implement Solana anchoring via memo program.
-
-**Memo format:** `vcot:v0.1:<merkle_root>:<event_count>:<timestamp>`
-
-```typescript
-import { Connection, Keypair, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
-import { createMemoInstruction } from '@solana/spl-memo';
-
-export class SolanaAdapter implements ChainAdapter {
-  readonly chain = 'solana';
-  private connection: Connection;
-  private keypair: Keypair;
-  
-  constructor() {
-    this.connection = new Connection(config.solanaRpcUrl);
-    this.keypair = Keypair.fromSecretKey(
-      bs58.decode(config.solanaPrivateKey)
-    );
+  // Check if account has enough credits
+  async hasCredits(accountId: string, required: number): Promise<boolean> {
+    const balance = await this.getBalance(accountId);
+    return balance >= required;
   }
   
-  async anchor(merkleRoot: string, eventCount: number): Promise<string> {
-    const timestamp = Math.floor(Date.now() / 1000);
-    const memo = `vcot:v0.1:${merkleRoot}:${eventCount}:${timestamp}`;
-    
-    const transaction = new Transaction().add(
-      createMemoInstruction(memo)
-    );
-    
-    const signature = await sendAndConfirmTransaction(
-      this.connection,
-      transaction,
-      [this.keypair],
-      { commitment: 'confirmed' }
-    );
-    
-    return signature;
-  }
-  
-  async getTransactionStatus(txHash: string): Promise<TransactionStatus> {
-    const status = await this.connection.getSignatureStatus(txHash);
-    
-    return {
-      confirmed: status?.value?.confirmationStatus === 'confirmed' || 
-                 status?.value?.confirmationStatus === 'finalized',
-      finalized: status?.value?.confirmationStatus === 'finalized',
-      confirmations: status?.value?.confirmations ?? 0,
-      error: status?.value?.err?.toString(),
-    };
-  }
-  
-  async getTransactionDetails(txHash: string): Promise<TransactionDetails> {
-    const tx = await this.connection.getTransaction(txHash, {
-      commitment: 'finalized',
-    });
-    
-    if (!tx) {
-      throw new Error('Transaction not found');
-    }
-    
-    // Parse memo from transaction
-    const memoInstruction = tx.transaction.message.instructions.find(
-      ix => ix.programId.toString() === 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'
-    );
-    
-    const memoData = memoInstruction?.data;
-    const memo = Buffer.from(memoData as Buffer).toString('utf8');
-    const [, , merkleRoot, eventCount, timestamp] = memo.split(':');
-    
-    return {
-      txHash,
-      blockNumber: tx.slot,
-      timestamp: new Date(parseInt(timestamp) * 1000).toISOString(),
-      merkleRoot,
-      eventCount: parseInt(eventCount),
-    };
-  }
-  
-  async verifyAnchor(merkleRoot: string, txHash: string): Promise<boolean> {
-    try {
-      const details = await this.getTransactionDetails(txHash);
-      return details.merkleRoot === merkleRoot;
-    } catch {
-      return false;
-    }
-  }
-  
-  async getCreditCost(): Promise<number> {
-    // Solana = 1 credit per stamp
-    return 1;
-  }
-}
-```
-
----
-
-### Story 5: EVM Adapter (EAS)
-**File:** `packages/worker/src/chains/evm.ts`
-
-Implement EVM anchoring via Ethereum Attestation Service.
-
-```typescript
-import { ethers } from 'ethers';
-import { EAS, SchemaEncoder } from '@ethereum-attestation-service/eas-sdk';
-
-const EAS_ADDRESSES: Record<string, string> = {
-  base: '0x4200000000000000000000000000000000000021',
-  ethereum: '0xA1207F3BBa224E2c9c3c6D5aF63D0eb1582Ce587',
-  arbitrum: '0xbD75f629A22Dc480D9470a94506ED',
-};
-
-const VCOT_SCHEMA_UID = '0x...'; // Will be registered
-
-export class EVMAdapter implements ChainAdapter {
-  readonly chain: string;
-  private provider: ethers.Provider;
-  private wallet: ethers.Wallet;
-  private eas: EAS;
-  
-  constructor(chain: string) {
-    this.chain = chain;
-    this.provider = new ethers.JsonRpcProvider(this.getRpcUrl(chain));
-    this.wallet = new ethers.Wallet(config.evmPrivateKey, this.provider);
-    this.eas = new EAS(EAS_ADDRESSES[chain]);
-    this.eas.connect(this.wallet);
-  }
-  
-  private getRpcUrl(chain: string): string {
-    switch (chain) {
-      case 'base': return config.baseRpcUrl;
-      case 'ethereum': return `https://eth-mainnet.g.alchemy.com/v2/${config.alchemyApiKey}`;
-      case 'arbitrum': return `https://arb-mainnet.g.alchemy.com/v2/${config.alchemyApiKey}`;
-      default: throw new Error(`Unknown EVM chain: ${chain}`);
-    }
-  }
-  
-  async anchor(merkleRoot: string, eventCount: number): Promise<string> {
-    const schemaEncoder = new SchemaEncoder(
-      'bytes32 merkleRoot,uint256 eventCount,uint256 timestamp'
-    );
-    
-    const encodedData = schemaEncoder.encodeData([
-      { name: 'merkleRoot', type: 'bytes32', value: merkleRoot },
-      { name: 'eventCount', type: 'uint256', value: eventCount },
-      { name: 'timestamp', type: 'uint256', value: Math.floor(Date.now() / 1000) },
-    ]);
-    
-    const tx = await this.eas.attest({
-      schema: VCOT_SCHEMA_UID,
-      data: {
-        recipient: ethers.ZeroAddress,
-        expirationTime: 0n,
-        revocable: false,
-        data: encodedData,
-      },
-    });
-    
-    const receipt = await tx.wait();
-    return receipt.hash;
-  }
-  
-  async getTransactionStatus(txHash: string): Promise<TransactionStatus> {
-    const receipt = await this.provider.getTransactionReceipt(txHash);
-    
-    if (!receipt) {
-      return { confirmed: false, finalized: false };
-    }
-    
-    const currentBlock = await this.provider.getBlockNumber();
-    const confirmations = currentBlock - receipt.blockNumber;
-    
-    return {
-      confirmed: confirmations >= 1,
-      finalized: confirmations >= 12, // EVM finality varies by chain
-      blockNumber: receipt.blockNumber,
-      confirmations,
-    };
-  }
-  
-  async verifyAnchor(merkleRoot: string, txHash: string): Promise<boolean> {
-    // Verify attestation exists and contains correct merkle root
-    try {
-      const tx = await this.provider.getTransaction(txHash);
-      // Parse attestation data...
-      return true; // Simplified
-    } catch {
-      return false;
-    }
-  }
-  
-  async getCreditCost(): Promise<number> {
-    switch (this.chain) {
-      case 'base': return 2;
-      case 'arbitrum': return 3;
-      case 'ethereum': return 20;
-      default: return 5;
-    }
-  }
-}
-```
-
----
-
-### Story 6: Bitcoin Adapter
-**File:** `packages/worker/src/chains/bitcoin.ts`
-
-Implement Bitcoin anchoring via OP_RETURN.
-
-**OP_RETURN format:** `VCOT` + 32-byte merkle root (36 bytes total)
-
-```typescript
-import * as bitcoin from 'bitcoinjs-lib';
-
-export class BitcoinAdapter implements ChainAdapter {
-  readonly chain = 'bitcoin';
-  private network: bitcoin.Network;
-  
-  constructor() {
-    this.network = config.nodeEnv === 'production' 
-      ? bitcoin.networks.bitcoin 
-      : bitcoin.networks.testnet;
-  }
-  
-  async anchor(merkleRoot: string, eventCount: number): Promise<string> {
-    // Build OP_RETURN transaction
-    const prefix = Buffer.from('VCOT');
-    const rootBytes = Buffer.from(merkleRoot.replace('sha256:', ''), 'hex');
-    const data = Buffer.concat([prefix, rootBytes]);
-    
-    const embed = bitcoin.payments.embed({ data: [data] });
-    
-    // Build and sign transaction
-    // ... (requires UTXO management, signing, broadcasting)
-    
-    throw new Error('Bitcoin adapter not fully implemented');
-  }
-  
-  async getTransactionStatus(txHash: string): Promise<TransactionStatus> {
-    // Query Bitcoin node/API for transaction status
-    throw new Error('Bitcoin adapter not fully implemented');
-  }
-  
-  async verifyAnchor(merkleRoot: string, txHash: string): Promise<boolean> {
-    throw new Error('Bitcoin adapter not fully implemented');
-  }
-  
-  async getCreditCost(): Promise<number> {
-    return 50; // Bitcoin is most expensive
-  }
-}
-```
-
-**Note:** Bitcoin adapter is more complex due to UTXO management. Mark as TODO for full implementation.
-
----
-
-### Story 7: Confirmation Checker
-**File:** `packages/worker/src/processors/confirmation.ts`
-
-Process confirmation check jobs.
-
-```typescript
-async function processConfirmationCheck(data: {
-  anchorId: string;
-  chain: string;
-  txHash: string;
-}): Promise<void> {
-  const adapter = getChainAdapter(data.chain);
-  const status = await adapter.getTransactionStatus(data.txHash);
-  
-  if (status.error) {
-    // Transaction failed - need to retry anchoring
-    await anchorRepo.update(data.anchorId, {
-      status: 'failed',
-      error: status.error,
-    });
-    return;
-  }
-  
-  if (status.finalized) {
-    // Update anchor to finalized
-    await anchorRepo.update(data.anchorId, {
-      status: 'finalized',
-      blockNumber: status.blockNumber,
-    });
-    
-    // Update all stamps to verified
-    const anchor = await anchorRepo.findById(data.anchorId);
-    await stampRepo.updateStatusByAnchor(data.anchorId, 'verified');
-    
-    return;
-  }
-  
-  if (status.confirmed) {
-    // Update anchor to confirmed
-    await anchorRepo.update(data.anchorId, {
-      status: 'confirmed',
-      blockNumber: status.blockNumber,
+  // Deduct credits (atomic operation)
+  async deduct(
+    accountId: string,
+    amount: number,
+    reason: string,
+    stampId?: string
+  ): Promise<boolean> {
+    return await db.transaction(async (tx) => {
+      // Get current balance with FOR UPDATE lock
+      const [account] = await tx
+        .select({ credits: accounts.credits })
+        .from(accounts)
+        .where(eq(accounts.id, accountId))
+        .for('update');
+      
+      if (!account || account.credits < amount) {
+        return false;
+      }
+      
+      // Deduct
+      await tx
+        .update(accounts)
+        .set({ credits: sql`${accounts.credits} - ${amount}` })
+        .where(eq(accounts.id, accountId));
+      
+      // Record transaction
+      await tx.insert(creditTransactions).values({
+        accountId,
+        amount: -amount,
+        type: 'deduct',
+        reason,
+        stampId,
+      });
+      
+      return true;
     });
   }
   
-  // Not yet finalized - requeue check
-  const delay = status.confirmed ? 60000 : 30000; // 1 min if confirmed, 30s if not
-  await confirmationQueue.add('check-confirmation', data, { delay });
-}
-```
-
----
-
-### Story 8: Merkle Batching Service
-**File:** `packages/worker/src/services/batching.ts`
-
-Service for managing batch windows.
-
-```typescript
-export class BatchingService {
-  private pendingBatch: Map<string, string[]> = new Map(); // chain -> stampIds
-  private batchTimers: Map<string, NodeJS.Timeout> = new Map();
-  
-  async addToBatch(stampId: string, chain: string): Promise<void> {
-    if (!this.pendingBatch.has(chain)) {
-      this.pendingBatch.set(chain, []);
-    }
-    
-    this.pendingBatch.get(chain)!.push(stampId);
-    
-    // Start timer if first item
-    if (this.pendingBatch.get(chain)!.length === 1) {
-      this.startBatchTimer(chain);
-    }
-    
-    // Flush if batch size reached
-    if (this.pendingBatch.get(chain)!.length >= config.anchorBatchSize) {
-      await this.flushBatch(chain);
-    }
-  }
-  
-  private startBatchTimer(chain: string): void {
-    const timer = setTimeout(async () => {
-      await this.flushBatch(chain);
-    }, config.anchorTimeWindowMs);
-    
-    this.batchTimers.set(chain, timer);
-  }
-  
-  async flushBatch(chain: string): Promise<void> {
-    const stampIds = this.pendingBatch.get(chain) ?? [];
-    if (stampIds.length === 0) return;
-    
-    // Clear pending
-    this.pendingBatch.set(chain, []);
-    
-    // Clear timer
-    const timer = this.batchTimers.get(chain);
-    if (timer) {
-      clearTimeout(timer);
-      this.batchTimers.delete(chain);
-    }
-    
-    // Queue anchor job
-    await anchorQueue.add('anchor-batch', {
-      stampIds,
-      chain,
-    });
-  }
-}
-```
-
----
-
-### Story 9: Anchor Repository
-**File:** `packages/worker/src/repositories/anchors.ts`
-
-Database access for anchors.
-
-```typescript
-export class AnchorRepository {
-  async insert(data: NewAnchor): Promise<Anchor> {
-    const [anchor] = await db.insert(anchors).values(data).returning();
-    return anchor;
-  }
-  
-  async findById(id: string): Promise<Anchor | null> {
-    return await db.query.anchors.findFirst({
-      where: eq(anchors.id, id),
+  // Add credits (purchase)
+  async addCredits(
+    accountId: string,
+    amount: number,
+    reason: string
+  ): Promise<void> {
+    await db.transaction(async (tx) => {
+      await tx
+        .update(accounts)
+        .set({ credits: sql`${accounts.credits} + ${amount}` })
+        .where(eq(accounts.id, accountId));
+      
+      await tx.insert(creditTransactions).values({
+        accountId,
+        amount,
+        type: 'purchase',
+        reason,
+      });
     });
   }
   
-  async findByMerkleRoot(root: string): Promise<Anchor | null> {
-    return await db.query.anchors.findFirst({
-      where: eq(anchors.merkleRoot, root),
-    });
-  }
-  
-  async update(id: string, data: Partial<Anchor>): Promise<void> {
-    await db.update(anchors).set(data).where(eq(anchors.id, id));
-  }
-  
-  async findPending(): Promise<Anchor[]> {
-    return await db.query.anchors.findMany({
-      where: eq(anchors.status, 'pending'),
-    });
-  }
-  
-  async findByChain(chain: string, options: QueryOptions): Promise<Anchor[]> {
-    return await db.query.anchors.findMany({
-      where: eq(anchors.chain, chain),
+  // Get transaction history
+  async getTransactions(
+    accountId: string,
+    options: { limit: number; offset: number }
+  ): Promise<CreditTransaction[]> {
+    return await db.query.creditTransactions.findMany({
+      where: eq(creditTransactions.accountId, accountId),
       limit: options.limit,
       offset: options.offset,
-      orderBy: desc(anchors.createdAt),
+      orderBy: desc(creditTransactions.createdAt),
     });
+  }
+  
+  // Calculate cost for stamps
+  calculateCost(stampCount: number, chain: string): number {
+    const costPerStamp = CHAIN_COSTS[chain] ?? 1;
+    return stampCount * costPerStamp;
+  }
+}
+
+const CHAIN_COSTS: Record<string, number> = {
+  solana: 1,
+  base: 2,
+  arbitrum: 3,
+  ethereum: 20,
+  bitcoin: 50,
+};
+```
+
+---
+
+### Story 2: Credit Endpoints
+**File:** `packages/api/src/routes/account.ts`
+
+Implement credit-related endpoints.
+
+**GET /v1/account/credits:**
+```typescript
+{
+  balance: number;
+  tier: string;
+  usage_this_month: number;
+}
+```
+
+**GET /v1/account/credits/transactions:**
+```typescript
+{
+  transactions: Array<{
+    id: string;
+    amount: number;
+    type: 'purchase' | 'deduct' | 'refund' | 'bonus';
+    reason: string;
+    stamp_id?: string;
+    created_at: string;
+  }>;
+  total: number;
+  limit: number;
+  offset: number;
+}
+```
+
+**POST /v1/account/credits/purchase:**
+Request:
+```typescript
+{
+  credits: number;  // Must be in valid packages: 1000, 10000, 100000, 1000000
+  payment_method_id?: string;  // Stripe payment method
+}
+```
+
+Response:
+```typescript
+{
+  success: boolean;
+  credits_added: number;
+  new_balance: number;
+  payment_id?: string;
+}
+```
+
+---
+
+### Story 3: Stripe Integration
+**File:** `packages/api/src/services/stripe.ts`
+
+Implement Stripe payment processing.
+
+```typescript
+import Stripe from 'stripe';
+
+const stripe = new Stripe(config.stripeSecretKey);
+
+// Credit packages
+const PACKAGES = {
+  1000: { price: 1000, credits: 1000 },      // $10
+  10000: { price: 7500, credits: 10000 },    // $75
+  100000: { price: 50000, credits: 100000 }, // $500
+  1000000: { price: 300000, credits: 1000000 }, // $3000
+};
+
+export class StripeService {
+  async createPaymentIntent(
+    accountId: string,
+    creditPackage: number
+  ): Promise<{ clientSecret: string; paymentId: string }> {
+    const pkg = PACKAGES[creditPackage];
+    if (!pkg) {
+      throw new ValidationError('Invalid credit package');
+    }
+    
+    const account = await accountRepo.findById(accountId);
+    
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: pkg.price,
+      currency: 'usd',
+      metadata: {
+        accountId,
+        credits: pkg.credits.toString(),
+      },
+    });
+    
+    return {
+      clientSecret: paymentIntent.client_secret!,
+      paymentId: paymentIntent.id,
+    };
+  }
+  
+  async handleWebhook(payload: string, signature: string): Promise<void> {
+    const event = stripe.webhooks.constructEvent(
+      payload,
+      signature,
+      config.stripeWebhookSecret
+    );
+    
+    if (event.type === 'payment_intent.succeeded') {
+      const paymentIntent = event.data.object as Stripe.PaymentIntent;
+      const { accountId, credits } = paymentIntent.metadata;
+      
+      await creditService.addCredits(
+        accountId,
+        parseInt(credits),
+        `Purchase: ${credits} credits`
+      );
+    }
   }
 }
 ```
 
 ---
 
-### Story 10: Worker Docker Setup
-**File:** `packages/worker/Dockerfile`
+### Story 4: Free Tier Handling
+**File:** `packages/api/src/services/credits.ts`
 
-Docker setup for worker.
+Handle free tier (transparency log only, no blockchain).
 
-```dockerfile
-FROM node:20-alpine AS base
-RUN corepack enable
-
-FROM base AS deps
-WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY packages/core/package.json ./packages/core/
-COPY packages/worker/package.json ./packages/worker/
-RUN pnpm install --frozen-lockfile
-
-FROM base AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/packages/core/node_modules ./packages/core/node_modules
-COPY --from=deps /app/packages/worker/node_modules ./packages/worker/node_modules
-COPY . .
-RUN pnpm turbo build --filter=@memstamp/worker
-
-FROM base AS runner
-WORKDIR /app
-ENV NODE_ENV=production
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 memstamp
-COPY --from=builder --chown=memstamp:nodejs /app/packages/worker/dist ./dist
-COPY --from=builder --chown=memstamp:nodejs /app/packages/worker/package.json ./
-USER memstamp
-CMD ["node", "dist/index.js"]
+```typescript
+// In stamp creation
+async function createStampWithFreeOption(
+  accountId: string,
+  input: CreateStampInput,
+  chain: string
+): Promise<Stamp> {
+  const cost = creditService.calculateCost(1, chain);
+  const hasCredits = await creditService.hasCredits(accountId, cost);
+  
+  if (!hasCredits) {
+    // Check if free tier eligible
+    const account = await accountRepo.findById(accountId);
+    
+    if (account.tier === 'free') {
+      // Create stamp without chain anchoring
+      // Still provides append-only Merkle log, just not anchored to blockchain
+      return await stampService.create(accountId, {
+        ...input,
+        chainless: true, // Flag for no blockchain anchoring
+      });
+    }
+    
+    throw new InsufficientCreditsError(cost, account.credits);
+  }
+  
+  // Normal path with credits
+  await creditService.deduct(accountId, cost, `Stamp on ${chain}`);
+  return await stampService.create(accountId, input);
+}
 ```
 
 ---
 
-### Story 11: Chain Costs Endpoint
-**File:** `packages/api/src/routes/public.ts`
+### Story 5: Python SDK — Package Setup
+**File:** `packages/python/setup.py`, `packages/python/pyproject.toml`
 
-Implement `GET /v1/chains` endpoint.
+Set up Python package properly.
 
-**Response:**
-```typescript
-{
-  chains: Array<{
-    id: string;
-    name: string;
-    credits_per_stamp: number;
-    status: 'active' | 'maintenance' | 'deprecated';
-    avg_finality_seconds: number;
-  }>;
-  default_chain: string;
-}
-```
+**pyproject.toml:**
+```toml
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
-**Implementation:**
-```typescript
-app.get('/v1/chains', async () => {
-  return {
-    chains: [
-      {
-        id: 'solana',
-        name: 'Solana',
-        credits_per_stamp: 1,
-        status: 'active',
-        avg_finality_seconds: 0.4,
-      },
-      {
-        id: 'base',
-        name: 'Base',
-        credits_per_stamp: 2,
-        status: 'active',
-        avg_finality_seconds: 2,
-      },
-      {
-        id: 'bitcoin',
-        name: 'Bitcoin',
-        credits_per_stamp: 50,
-        status: 'active',
-        avg_finality_seconds: 600,
-      },
-    ],
-    default_chain: config.defaultChain,
-  };
-});
+[project]
+name = "memstamp"
+version = "0.1.0"
+description = "Python SDK for memstamp — verifiable audit trails for AI agents"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+  {name = "Dharma Technologies", email = "hello@dharma.us"}
+]
+requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "httpx>=0.25.0",
+  "pydantic>=2.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4.0",
+  "pytest-asyncio>=0.23.0",
+  "ruff>=0.1.0",
+  "mypy>=1.8.0",
+]
+langchain = ["langchain>=0.1.0"]
+mem0 = ["mem0ai>=0.0.1"]
+
+[project.urls]
+"Homepage" = "https://memstamp.io"
+"Documentation" = "https://memstamp.io/docs"
+"Source" = "https://github.com/Dharma-Technologies/memstamp"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+select = ["E", "F", "W", "I", "N", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
 ```
 
 ---
 
-### Story 12: Worker Health & Metrics
-**File:** `packages/worker/src/health.ts`
+### Story 6: Python SDK — Client
+**File:** `packages/python/memstamp/client.py`
 
-Add health check and metrics endpoint for worker.
+Implement the main SDK client.
 
-```typescript
-import Fastify from 'fastify';
+```python
+from typing import Any, Optional
+from datetime import datetime
+import hashlib
+import json
 
-const healthServer = Fastify();
+import httpx
+from pydantic import BaseModel
 
-healthServer.get('/health', async () => {
-  // Check Redis connection
-  const redisOk = await redis.ping() === 'PONG';
-  
-  // Check queue stats
-  const waiting = await anchorQueue.getWaitingCount();
-  const active = await anchorQueue.getActiveCount();
-  
-  return {
-    status: redisOk ? 'ok' : 'degraded',
-    redis: redisOk ? 'ok' : 'error',
-    queue: {
-      waiting,
-      active,
-    },
-    timestamp: new Date().toISOString(),
-  };
-});
+from memstamp.types import Stamp, VerificationResult, VCOTEventType
 
-healthServer.get('/metrics', async () => {
-  const completed = await anchorQueue.getCompletedCount();
-  const failed = await anchorQueue.getFailedCount();
-  
-  return {
-    jobs_completed: completed,
-    jobs_failed: failed,
-    uptime_seconds: process.uptime(),
-  };
-});
 
-export async function startHealthServer(): Promise<void> {
-  await healthServer.listen({ port: 8011, host: '0.0.0.0' });
-  console.log('Worker health server on port 8011');
-}
+class MemstampClient:
+    """
+    Client for the memstamp API.
+    
+    Args:
+        api_key: Your memstamp API key (ms_live_xxx or ms_test_xxx)
+        base_url: API base URL (default: https://api.memstamp.io)
+        timeout: Request timeout in seconds
+    
+    Example:
+        >>> client = MemstampClient(api_key="ms_live_xxx")
+        >>> stamp = client.stamp(
+        ...     agent_id="my-agent",
+        ...     event_type="decision",
+        ...     content={"action": "approved_loan", "amount": 50000}
+        ... )
+        >>> print(f"Stamp created: {stamp.id}")
+    """
+    
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.memstamp.io",
+        timeout: float = 30.0,
+    ):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.Client(
+            base_url=self.base_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout,
+        )
+    
+    def stamp(
+        self,
+        agent_id: str,
+        event_type: VCOTEventType,
+        content: Any,
+        framework: str = "memstamp-py/0.1",
+        signature: str = "",
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Stamp:
+        """
+        Create a stamp for an agent event.
+        
+        The content is hashed locally — raw content never leaves your environment.
+        """
+        content_hash = self._compute_hash(content)
+        
+        response = self._client.post(
+            "/v1/stamps",
+            json={
+                "agent_id": agent_id,
+                "event_type": event_type,
+                "content_hash": content_hash,
+                "framework": framework,
+                "signature": signature or self._generate_placeholder_signature(),
+                "metadata": metadata,
+            },
+        )
+        response.raise_for_status()
+        return Stamp(**response.json())
+    
+    def stamp_batch(
+        self,
+        stamps: list[dict[str, Any]],
+    ) -> list[Stamp]:
+        """Create multiple stamps at once."""
+        processed = []
+        for s in stamps:
+            processed.append({
+                "agent_id": s["agent_id"],
+                "event_type": s["event_type"],
+                "content_hash": self._compute_hash(s["content"]),
+                "framework": s.get("framework", "memstamp-py/0.1"),
+                "signature": s.get("signature", self._generate_placeholder_signature()),
+                "metadata": s.get("metadata"),
+            })
+        
+        response = self._client.post(
+            "/v1/stamps/batch",
+            json={"stamps": processed},
+        )
+        response.raise_for_status()
+        return [Stamp(**s) for s in response.json()["stamps"]]
+    
+    def verify(self, stamp_id: str) -> VerificationResult:
+        """Verify a stamp against the blockchain."""
+        response = self._client.get(f"/v1/stamps/{stamp_id}/verify")
+        response.raise_for_status()
+        return VerificationResult(**response.json())
+    
+    def get_stamp(self, stamp_id: str) -> Stamp:
+        """Get a stamp by ID."""
+        response = self._client.get(f"/v1/stamps/{stamp_id}")
+        response.raise_for_status()
+        return Stamp(**response.json())
+    
+    def list_stamps(
+        self,
+        agent_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        status: Optional[str] = None,
+    ) -> tuple[list[Stamp], int]:
+        """List stamps for an agent."""
+        params = {"limit": limit, "offset": offset}
+        if status:
+            params["status"] = status
+        
+        response = self._client.get(
+            f"/v1/agents/{agent_id}/stamps",
+            params=params,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return [Stamp(**s) for s in data["stamps"]], data["total"]
+    
+    def get_audit_trail(self, agent_id: str) -> dict[str, Any]:
+        """Get the audit trail for an agent."""
+        response = self._client.get(f"/v1/agents/{agent_id}/trail")
+        response.raise_for_status()
+        return response.json()
+    
+    def get_credits(self) -> dict[str, Any]:
+        """Get account credit balance."""
+        response = self._client.get("/v1/account/credits")
+        response.raise_for_status()
+        return response.json()
+    
+    def _compute_hash(self, content: Any) -> str:
+        """Compute SHA-256 hash with canonical JSON serialization."""
+        canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
+        hash_bytes = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return f"sha256:{hash_bytes}"
+    
+    def _generate_placeholder_signature(self) -> str:
+        """Generate a placeholder signature for testing."""
+        return "placeholder_signature"
+    
+    def close(self):
+        """Close the HTTP client."""
+        self._client.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        self.close()
+
+
+class AsyncMemstampClient:
+    """Async version of MemstampClient."""
+    
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.memstamp.io",
+        timeout: float = 30.0,
+    ):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout,
+        )
+    
+    async def stamp(
+        self,
+        agent_id: str,
+        event_type: VCOTEventType,
+        content: Any,
+        framework: str = "memstamp-py/0.1",
+        signature: str = "",
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Stamp:
+        content_hash = self._compute_hash(content)
+        
+        response = await self._client.post(
+            "/v1/stamps",
+            json={
+                "agent_id": agent_id,
+                "event_type": event_type,
+                "content_hash": content_hash,
+                "framework": framework,
+                "signature": signature or "placeholder",
+                "metadata": metadata,
+            },
+        )
+        response.raise_for_status()
+        return Stamp(**response.json())
+    
+    # ... async versions of other methods ...
+    
+    def _compute_hash(self, content: Any) -> str:
+        canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
+        hash_bytes = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return f"sha256:{hash_bytes}"
+    
+    async def close(self):
+        await self._client.aclose()
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, *args):
+        await self.close()
+```
+
+---
+
+### Story 7: Python SDK — LangChain Integration
+**File:** `packages/python/memstamp/integrations/langchain.py`
+
+LangChain callback handler.
+
+```python
+"""LangChain integration for automatic stamping."""
+
+from typing import Any, Optional, List, Dict, Union
+from uuid import UUID
+
+try:
+    from langchain.callbacks.base import BaseCallbackHandler
+except ImportError:
+    raise ImportError("langchain is required: pip install memstamp[langchain]")
+
+from memstamp.client import MemstampClient
+
+
+class MemstampCallbackHandler(BaseCallbackHandler):
+    """
+    LangChain callback handler that stamps events to memstamp.
+    
+    Example:
+        >>> from memstamp.integrations.langchain import MemstampCallbackHandler
+        >>> handler = MemstampCallbackHandler(
+        ...     api_key="ms_live_xxx",
+        ...     agent_id="my-langchain-agent"
+        ... )
+        >>> chain.invoke(input, callbacks=[handler])
+    """
+    
+    def __init__(
+        self,
+        api_key: str,
+        agent_id: str,
+        base_url: str = "https://api.memstamp.io",
+        stamp_on: Optional[List[str]] = None,
+    ):
+        self.client = MemstampClient(api_key=api_key, base_url=base_url)
+        self.agent_id = agent_id
+        self.stamp_on = stamp_on or [
+            "on_llm_start",
+            "on_llm_end", 
+            "on_tool_start",
+            "on_tool_end",
+        ]
+    
+    def on_llm_start(
+        self,
+        serialized: Dict[str, Any],
+        prompts: List[str],
+        **kwargs: Any,
+    ) -> None:
+        if "on_llm_start" not in self.stamp_on:
+            return
+        
+        self.client.stamp(
+            agent_id=self.agent_id,
+            event_type="tool_call",
+            content={
+                "type": "llm_start",
+                "model": serialized.get("name", "unknown"),
+                "prompts": prompts,
+            },
+            framework="langchain",
+        )
+    
+    def on_llm_end(
+        self,
+        response: Any,
+        **kwargs: Any,
+    ) -> None:
+        if "on_llm_end" not in self.stamp_on:
+            return
+        
+        self.client.stamp(
+            agent_id=self.agent_id,
+            event_type="tool_result",
+            content={
+                "type": "llm_end",
+                "generations": str(response.generations) if hasattr(response, 'generations') else str(response),
+            },
+            framework="langchain",
+        )
+    
+    def on_tool_start(
+        self,
+        serialized: Dict[str, Any],
+        input_str: str,
+        **kwargs: Any,
+    ) -> None:
+        if "on_tool_start" not in self.stamp_on:
+            return
+        
+        self.client.stamp(
+            agent_id=self.agent_id,
+            event_type="tool_call",
+            content={
+                "type": "tool_start",
+                "tool": serialized.get("name", "unknown"),
+                "input": input_str,
+            },
+            framework="langchain",
+        )
+    
+    def on_tool_end(
+        self,
+        output: str,
+        **kwargs: Any,
+    ) -> None:
+        if "on_tool_end" not in self.stamp_on:
+            return
+        
+        self.client.stamp(
+            agent_id=self.agent_id,
+            event_type="tool_result",
+            content={
+                "type": "tool_end",
+                "output": output,
+            },
+            framework="langchain",
+        )
+    
+    def on_chain_start(
+        self,
+        serialized: Dict[str, Any],
+        inputs: Dict[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        if "on_chain_start" not in self.stamp_on:
+            return
+        
+        self.client.stamp(
+            agent_id=self.agent_id,
+            event_type="state_change",
+            content={
+                "type": "chain_start",
+                "chain": serialized.get("name", "unknown"),
+            },
+            framework="langchain",
+        )
+    
+    def on_chain_end(
+        self,
+        outputs: Dict[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        if "on_chain_end" not in self.stamp_on:
+            return
+        
+        self.client.stamp(
+            agent_id=self.agent_id,
+            event_type="state_change",
+            content={
+                "type": "chain_end",
+            },
+            framework="langchain",
+        )
+```
+
+---
+
+### Story 8: Python SDK — mem0 Integration
+**File:** `packages/python/memstamp/integrations/mem0.py`
+
+mem0 integration for memory stamping.
+
+```python
+"""mem0 integration for stamping memory operations."""
+
+from typing import Any, Optional
+
+from memstamp.client import MemstampClient
+
+
+class MemstampMem0Hook:
+    """
+    Hook for mem0 that stamps memory operations.
+    
+    Example:
+        >>> from mem0 import Memory
+        >>> from memstamp.integrations.mem0 import MemstampMem0Hook
+        >>> 
+        >>> hook = MemstampMem0Hook(api_key="ms_live_xxx", agent_id="my-agent")
+        >>> m = Memory()
+        >>> m.add_hooks(hook)
+    """
+    
+    def __init__(
+        self,
+        api_key: str,
+        agent_id: str,
+        base_url: str = "https://api.memstamp.io",
+    ):
+        self.client = MemstampClient(api_key=api_key, base_url=base_url)
+        self.agent_id = agent_id
+    
+    def on_add(
+        self,
+        messages: list[dict[str, Any]],
+        user_id: str,
+        agent_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when memory is added."""
+        self.client.stamp(
+            agent_id=self.agent_id,
+            event_type="memory_write",
+            content={
+                "operation": "add",
+                "user_id": user_id,
+                "message_count": len(messages),
+            },
+            framework="mem0",
+        )
+    
+    def on_search(
+        self,
+        query: str,
+        user_id: str,
+        **kwargs: Any,
+    ) -> None:
+        """Called when memory is searched."""
+        self.client.stamp(
+            agent_id=self.agent_id,
+            event_type="memory_read",
+            content={
+                "operation": "search",
+                "user_id": user_id,
+                "query_length": len(query),
+            },
+            framework="mem0",
+        )
+    
+    def on_delete(
+        self,
+        memory_id: str,
+        **kwargs: Any,
+    ) -> None:
+        """Called when memory is deleted."""
+        self.client.stamp(
+            agent_id=self.agent_id,
+            event_type="memory_write",
+            content={
+                "operation": "delete",
+                "memory_id": memory_id,
+            },
+            framework="mem0",
+        )
+```
+
+---
+
+### Story 9: Python SDK — Tests
+**File:** `packages/python/tests/`
+
+Comprehensive tests for Python SDK.
+
+```python
+# tests/test_client.py
+import pytest
+from memstamp.client import MemstampClient
+
+
+class TestMemstampClient:
+    def test_compute_hash_deterministic(self):
+        client = MemstampClient(api_key="test", base_url="http://localhost:8010")
+        
+        hash1 = client._compute_hash({"a": 1, "b": 2})
+        hash2 = client._compute_hash({"b": 2, "a": 1})
+        
+        assert hash1 == hash2
+        assert hash1.startswith("sha256:")
+    
+    def test_hash_different_content(self):
+        client = MemstampClient(api_key="test", base_url="http://localhost:8010")
+        
+        hash1 = client._compute_hash({"a": 1})
+        hash2 = client._compute_hash({"a": 2})
+        
+        assert hash1 != hash2
+    
+    def test_hash_format(self):
+        client = MemstampClient(api_key="test", base_url="http://localhost:8010")
+        
+        h = client._compute_hash({"test": True})
+        
+        assert h.startswith("sha256:")
+        assert len(h) == 7 + 64  # prefix + 64 hex chars
+
+
+# tests/test_types.py
+from memstamp.types import Stamp, VerificationResult
+
+
+def test_stamp_model():
+    stamp = Stamp(
+        id="test-id",
+        event_id="event-123",
+        content_hash="sha256:abc123",
+        previous_hash="sha256:000000",
+        agent_id="agent-1",
+        event_type="decision",
+        status="pending",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    
+    assert stamp.id == "test-id"
+    assert stamp.status == "pending"
+```
+
+---
+
+### Story 10: Python SDK — PyPI Publishing
+**File:** `.github/workflows/python-publish.yml`
+
+GitHub Action for PyPI publishing.
+
+```yaml
+name: Publish Python Package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install build tools
+        run: |
+          pip install build twine
+      
+      - name: Build package
+        run: |
+          cd packages/python
+          python -m build
+      
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          cd packages/python
+          twine upload dist/*
 ```
 
 ---
 
 ## Completion Criteria
 
-- [ ] All 12 stories implemented
-- [ ] Worker processes anchor jobs
-- [ ] Solana adapter functional
-- [ ] EVM adapter functional (Base at minimum)
-- [ ] Merkle batching working
-- [ ] Confirmation tracking working
-- [ ] Worker health endpoint
-- [ ] Docker build succeeds
-- [ ] Integration tests pass (with devnet)
+- [ ] All 10 stories implemented
+- [ ] Credit deduction working on stamp creation
+- [ ] Stripe integration tested
+- [ ] Python SDK installable with pip
+- [ ] LangChain integration works
+- [ ] mem0 integration works
+- [ ] Python SDK tests pass
+- [ ] PyPI publish workflow ready
