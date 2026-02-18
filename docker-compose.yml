@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: memstamp-postgres
+    environment:
+      POSTGRES_USER: memstamp
+      POSTGRES_PASSWORD: memstamp_dev
+      POSTGRES_DB: memstamp
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memstamp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: memstamp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    container_name: memstamp-api
+    ports:
+      - "8010:8010"
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://memstamp:memstamp_dev@postgres:5432/memstamp
+      REDIS_URL: redis://redis:6379
+      PORT: 8010
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./packages/api/src:/app/packages/api/src:ro
+      - ./packages/core/src:/app/packages/core/src:ro
+
+  worker:
+    build:
+      context: .
+      dockerfile: packages/worker/Dockerfile
+    container_name: memstamp-worker
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://memstamp:memstamp_dev@postgres:5432/memstamp
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./packages/worker/src:/app/packages/worker/src:ro
+      - ./packages/core/src:/app/packages/core/src:ro
+
+volumes:
+  postgres_data:
+  redis_data:
