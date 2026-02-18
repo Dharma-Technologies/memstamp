@@ -269,568 +269,751 @@ EVM_PRIVATE_KEY=xxx     # 0x prefixed
 
 ---
 
-## Current Stage: P11-03-stamp-lifecycle
+## Current Stage: P11-04-chain-anchoring
 
-# P11-03: Stamp Lifecycle
+# P11-04: Chain Anchoring
 
-**Phase 3 — Stamp CRUD & Status Management**
+**Phase 4 — Blockchain Integration**
 
-Implement stamp ingestion, storage, querying, and status tracking.
+Build the worker for background anchoring and implement chain adapters for Solana, EVM, and Bitcoin.
 
 ---
 
 ## Stories
 
-### Story 1: Create Stamp Endpoint
-**File:** `packages/api/src/routes/stamps.ts`
+### Story 1: Worker Setup
+**File:** `packages/worker/src/index.ts`
 
-Implement `POST /v1/stamps` to create a single stamp.
+Set up BullMQ worker to process anchor jobs.
 
-**Request:**
+**Worker configuration:**
 ```typescript
-{
-  agent_id: string;
-  event_type: VCOTEventType;
-  content_hash: string;      // sha256:xxx
-  previous_hash?: string;    // Optional - auto-fetch if not provided
-  framework: string;
-  signature: string;
-  metadata?: Record<string, unknown>;
-}
-```
+import { Worker, Job } from 'bullmq';
+import IORedis from 'ioredis';
 
-**Response:**
-```typescript
-{
-  id: string;
-  event_id: string;
-  agent_id: string;
-  event_type: string;
-  content_hash: string;
-  previous_hash: string;
-  status: 'pending';
-  created_at: string;
-}
-```
-
-**Logic:**
-1. Validate request with Zod
-2. If `previous_hash` not provided, fetch latest stamp for agent_id
-3. Generate event_id (UUIDv7)
-4. Insert stamp with status='pending'
-5. Deduct 1 credit (based on chain)
-6. Add to anchor queue
-7. Return stamp
-
-**Errors:**
-- 400: Invalid request
-- 401: Unauthorized
-- 402: Insufficient credits
-
----
-
-### Story 2: Batch Create Stamps Endpoint
-**File:** `packages/api/src/routes/stamps.ts`
-
-Implement `POST /v1/stamps/batch` for bulk stamp creation.
-
-**Request:**
-```typescript
-{
-  stamps: Array<CreateStampRequest>;  // Max 1000
-}
-```
-
-**Response:**
-```typescript
-{
-  created: number;
-  stamps: Array<{
-    id: string;
-    event_id: string;
-    content_hash: string;
-    status: 'pending';
-  }>;
-  credits_used: number;
-}
-```
-
-**Logic:**
-1. Validate all stamps
-2. Check total credit requirement
-3. Insert all stamps in transaction
-4. Deduct credits
-5. Add batch to anchor queue
-6. Return summary
-
-**Optimizations:**
-- Use batch insert
-- Single credit transaction
-- Group by agent_id for chain linking
-
----
-
-### Story 3: Get Stamp Endpoint
-**File:** `packages/api/src/routes/stamps.ts`
-
-Implement `GET /v1/stamps/:id`.
-
-**Response:**
-```typescript
-{
-  id: string;
-  event_id: string;
-  agent_id: string;
-  event_type: string;
-  content_hash: string;
-  previous_hash: string;
-  framework: string;
-  signature: string;
-  status: 'pending' | 'anchored' | 'verified';
-  anchor_id?: string;
-  merkle_index?: number;
-  created_at: string;
-  anchored_at?: string;
-}
-```
-
-**Logic:**
-1. Fetch stamp by ID
-2. Verify stamp belongs to account
-3. Return stamp with anchor info if anchored
-
----
-
-### Story 4: List Agent Stamps Endpoint
-**File:** `packages/api/src/routes/stamps.ts`
-
-Implement `GET /v1/agents/:agent_id/stamps`.
-
-**Query params:**
-- `limit` — Max results (default 50, max 100)
-- `offset` — Pagination offset
-- `status` — Filter by status
-- `from` — Start timestamp
-- `to` — End timestamp
-
-**Response:**
-```typescript
-{
-  stamps: Array<Stamp>;
-  total: number;
-  limit: number;
-  offset: number;
-}
-```
-
-**Logic:**
-1. Verify account owns stamps for agent_id
-2. Apply filters
-3. Return paginated results
-4. Include total count for pagination
-
----
-
-### Story 5: Get Audit Trail Endpoint
-**File:** `packages/api/src/routes/stamps.ts`
-
-Implement `GET /v1/agents/:agent_id/trail`.
-
-Returns stamps in order with hash chain validation status.
-
-**Response:**
-```typescript
-{
-  agent_id: string;
-  stamps: Array<{
-    id: string;
-    event_id: string;
-    content_hash: string;
-    previous_hash: string;
-    timestamp: string;
-    chain_valid: boolean;  // Hash chain intact to this point
-  }>;
-  chain_integrity: 'valid' | 'broken' | 'incomplete';
-  first_stamp: string;    // Timestamp
-  last_stamp: string;     // Timestamp
-  total_stamps: number;
-}
-```
-
-**Logic:**
-1. Fetch all stamps for agent in order
-2. Validate hash chain
-3. Flag any breaks
-4. Return trail with integrity status
-
----
-
-### Story 6: Gap Detection Endpoint
-**File:** `packages/api/src/routes/stamps.ts`
-
-Implement `GET /v1/agents/:agent_id/gaps`.
-
-Detect time periods with no stamps (potential selective stamping).
-
-**Query params:**
-- `threshold_minutes` — Gap threshold (default 60)
-- `from` — Start timestamp
-- `to` — End timestamp
-
-**Response:**
-```typescript
-{
-  agent_id: string;
-  gaps: Array<{
-    start: string;
-    end: string;
-    duration_minutes: number;
-  }>;
-  gap_count: number;
-  analyzed_period: {
-    start: string;
-    end: string;
-  };
-  average_stamp_interval_minutes: number;
-}
-```
-
-**Logic:**
-1. Fetch stamps in time range
-2. Calculate intervals between stamps
-3. Flag intervals exceeding threshold
-4. Calculate statistics
-
----
-
-### Story 7: Verify Stamp Endpoint (Authenticated)
-**File:** `packages/api/src/routes/stamps.ts`
-
-Implement `GET /v1/stamps/:id/verify`.
-
-Full verification including chain lookup.
-
-**Response:**
-```typescript
-{
-  verified: boolean;
-  stamp_id: string;
-  content_hash: string;
-  merkle_root?: string;
-  merkle_proof?: MerkleProof;
-  anchor?: {
-    id: string;
-    chain: string;
-    tx_hash: string;
-    block_number?: number;
-    status: string;
-  };
-  chain_verified: boolean;
-  signature_verified: boolean;
-  hash_chain_valid: boolean;
-  error?: string;
-}
-```
-
-**Logic:**
-1. Fetch stamp
-2. Get anchor if anchored
-3. Generate Merkle proof
-4. Verify signature
-5. Verify hash chain
-6. Check chain (if anchored)
-7. Return full verification result
-
----
-
-### Story 8: Get Merkle Proof Endpoint
-**File:** `packages/api/src/routes/stamps.ts`
-
-Implement `GET /v1/stamps/:id/proof`.
-
-**Response:**
-```typescript
-{
-  stamp_id: string;
-  leaf: string;
-  proof: Array<{
-    hash: string;
-    position: 'left' | 'right';
-  }>;
-  root: string;
-  anchor_id: string;
-  chain: string;
-  tx_hash?: string;
-}
-```
-
-**Logic:**
-1. Fetch stamp
-2. Verify stamp is anchored
-3. Fetch all stamps in same anchor batch
-4. Generate Merkle proof
-5. Return proof with anchor info
-
----
-
-### Story 9: Stamp Service Layer
-**File:** `packages/api/src/services/stamps.ts`
-
-Create service layer for stamp operations.
-
-**Functions:**
-```typescript
-export class StampService {
-  // Create single stamp
-  async create(accountId: string, input: CreateStampInput): Promise<Stamp>
-  
-  // Create batch of stamps
-  async createBatch(accountId: string, stamps: CreateStampInput[]): Promise<Stamp[]>
-  
-  // Get stamp by ID
-  async getById(id: string, accountId: string): Promise<Stamp | null>
-  
-  // List stamps for agent
-  async listByAgent(
-    agentId: string,
-    accountId: string,
-    options: ListOptions
-  ): Promise<{ stamps: Stamp[]; total: number }>
-  
-  // Get audit trail
-  async getAuditTrail(agentId: string, accountId: string): Promise<AuditTrail>
-  
-  // Detect gaps
-  async detectGaps(
-    agentId: string,
-    accountId: string,
-    thresholdMinutes: number
-  ): Promise<GapReport>
-  
-  // Get latest stamp for agent (for chaining)
-  async getLatestForAgent(agentId: string, accountId: string): Promise<Stamp | null>
-  
-  // Update stamp status
-  async updateStatus(
-    stampIds: string[],
-    status: StampStatus,
-    anchorId?: string
-  ): Promise<void>
-}
-```
-
----
-
-### Story 10: Hash Chain Validation Service
-**File:** `packages/api/src/services/chain-validation.ts`
-
-Service for validating hash chains.
-
-**Functions:**
-```typescript
-export class ChainValidationService {
-  // Validate entire chain for an agent
-  async validateChain(
-    agentId: string,
-    accountId: string
-  ): Promise<ChainValidationResult>
-  
-  // Validate signature on a stamp
-  async validateSignature(
-    stamp: Stamp,
-    publicKey: string
-  ): Promise<boolean>
-  
-  // Find chain breaks
-  async findChainBreaks(
-    stamps: Stamp[]
-  ): Promise<ChainBreak[]>
-}
-
-interface ChainValidationResult {
-  valid: boolean;
-  total_stamps: number;
-  breaks: ChainBreak[];
-  first_break_at?: string;
-}
-
-interface ChainBreak {
-  stamp_id: string;
-  expected_previous: string;
-  actual_previous: string;
-  position: number;
-}
-```
-
----
-
-### Story 11: Anchor Queue Integration
-**File:** `packages/api/src/services/queue.ts`
-
-Set up BullMQ queue for anchor jobs.
-
-**Queues:**
-```typescript
-import { Queue } from 'bullmq';
-import { redis } from './redis';
-
-export const anchorQueue = new Queue('anchor', {
-  connection: redis,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 1000,
-    },
-  },
+const connection = new IORedis(config.redisUrl, {
+  maxRetriesPerRequest: null,
 });
 
-// Add stamp to anchor queue
-export async function queueForAnchoring(stampIds: string[]): Promise<void> {
-  await anchorQueue.add('anchor-batch', { stampIds }, {
-    delay: config.anchorTimeWindowMs,  // Wait for batch window
-  });
-}
+const worker = new Worker('anchor', async (job: Job) => {
+  switch (job.name) {
+    case 'anchor-batch':
+      return await processBatchAnchor(job.data);
+    case 'anchor-immediate':
+      return await processImmediateAnchor(job.data);
+    case 'verify-confirmation':
+      return await processConfirmationCheck(job.data);
+    default:
+      throw new Error(`Unknown job type: ${job.name}`);
+  }
+}, {
+  connection,
+  concurrency: 5,
+});
 
-// Add immediate anchor job (for single high-priority stamps)
-export async function queueImmediateAnchor(stampId: string): Promise<void> {
-  await anchorQueue.add('anchor-immediate', { stampId }, {
-    priority: 1,
-  });
-}
+worker.on('completed', (job, result) => {
+  console.log(`Job ${job.id} completed:`, result);
+});
+
+worker.on('failed', (job, err) => {
+  console.error(`Job ${job?.id} failed:`, err);
+});
 ```
 
 ---
 
-### Story 12: Stamp Status Transitions
-**File:** `packages/api/src/services/stamps.ts`
+### Story 2: Batch Anchor Processor
+**File:** `packages/worker/src/processors/batch.ts`
 
-Implement status transition logic.
+Process batch anchor jobs.
 
-**States:**
-1. `pending` — Created, waiting for anchoring
-2. `anchored` — Included in Merkle tree, submitted to chain
-3. `verified` — Chain transaction confirmed/finalized
-
-**Transitions:**
-- `pending` → `anchored` (when batch submitted)
-- `anchored` → `verified` (when chain confirms)
-- No backward transitions
-
-**Update function:**
-```typescript
-async function transitionStatus(
-  stampId: string,
-  from: StampStatus,
-  to: StampStatus,
-  anchorId?: string
-): Promise<boolean> {
-  const result = await db.update(stamps)
-    .set({ 
-      status: to, 
-      anchorId,
-      ...(to === 'anchored' ? { anchoredAt: new Date() } : {})
-    })
-    .where(
-      and(
-        eq(stamps.id, stampId),
-        eq(stamps.status, from)
-      )
-    )
-    .returning();
-  
-  return result.length > 0;
-}
-```
-
----
-
-### Story 13: Stamp Repository
-**File:** `packages/api/src/repositories/stamps.ts`
-
-Database access layer for stamps.
+**Logic:**
+1. Fetch all pending stamps for the batch
+2. Group by chain preference
+3. Build Merkle tree from content hashes
+4. Create anchor record
+5. Submit to chain
+6. Update stamp statuses
+7. Queue confirmation check
 
 ```typescript
-export class StampRepository {
-  // Insert stamp
-  async insert(data: NewStamp): Promise<Stamp>
+async function processBatchAnchor(data: { stampIds?: string[] }): Promise<AnchorResult> {
+  // Get pending stamps (either specific IDs or by time window)
+  const stamps = data.stampIds 
+    ? await stampRepo.findByIds(data.stampIds)
+    : await stampRepo.findPendingForAnchoring(config.defaultChain, config.anchorBatchSize);
   
-  // Insert batch
-  async insertBatch(data: NewStamp[]): Promise<Stamp[]>
+  if (stamps.length === 0) {
+    return { skipped: true, reason: 'No pending stamps' };
+  }
   
-  // Find by ID
-  async findById(id: string): Promise<Stamp | null>
+  // Build Merkle tree
+  const leaves = stamps.map(s => s.contentHash);
+  const merkleRoot = computeMerkleRoot(leaves);
   
-  // Find by event ID
-  async findByEventId(eventId: string): Promise<Stamp | null>
+  // Create anchor record
+  const anchor = await anchorRepo.insert({
+    merkleRoot,
+    eventCount: stamps.length,
+    startTime: stamps[0].createdAt,
+    endTime: stamps[stamps.length - 1].createdAt,
+    chain: config.defaultChain,
+    status: 'pending',
+  });
   
-  // Find by account
-  async findByAccount(
-    accountId: string,
-    options: QueryOptions
-  ): Promise<Stamp[]>
+  // Submit to chain
+  const chainAdapter = getChainAdapter(config.defaultChain);
+  const txHash = await chainAdapter.anchor(merkleRoot, stamps.length);
   
-  // Find by agent
-  async findByAgent(
-    agentId: string,
-    accountId: string,
-    options: QueryOptions
-  ): Promise<Stamp[]>
+  // Update anchor with tx hash
+  await anchorRepo.update(anchor.id, { txHash });
   
-  // Find pending stamps for anchoring
-  async findPendingForAnchoring(
-    chain: string,
-    limit: number
-  ): Promise<Stamp[]>
+  // Update stamps
+  await stampRepo.updateStatus(stamps.map(s => s.id), 'anchored', anchor.id);
   
-  // Update status
-  async updateStatus(
-    ids: string[],
-    status: StampStatus,
-    anchorId?: string
-  ): Promise<number>
+  // Queue confirmation check
+  await confirmationQueue.add('check-confirmation', {
+    anchorId: anchor.id,
+    chain: config.defaultChain,
+    txHash,
+  }, { delay: 30000 }); // Check after 30 seconds
   
-  // Count by agent
-  async countByAgent(
-    agentId: string,
-    accountId: string
-  ): Promise<number>
+  return {
+    anchorId: anchor.id,
+    merkleRoot,
+    stampCount: stamps.length,
+    txHash,
+  };
 }
 ```
 
 ---
 
-### Story 14: Tests for Stamp Endpoints
-**File:** `packages/api/tests/stamps.test.ts`
+### Story 3: Chain Adapter Interface
+**File:** `packages/worker/src/chains/types.ts`
 
-Integration tests for stamp endpoints.
+Define the chain adapter interface.
 
-**Test scenarios:**
-1. Create stamp successfully
-2. Create stamp without credits fails
-3. Batch create stamps
-4. Get stamp by ID
-5. Get stamp not owned returns 404
-6. List stamps with pagination
-7. List stamps with filters
-8. Get audit trail
-9. Gap detection
-10. Verify stamp
+```typescript
+export interface ChainAdapter {
+  // Chain identifier
+  readonly chain: string;
+  
+  // Anchor a Merkle root
+  anchor(merkleRoot: string, eventCount: number): Promise<string>; // Returns tx hash
+  
+  // Check transaction status
+  getTransactionStatus(txHash: string): Promise<TransactionStatus>;
+  
+  // Get transaction details
+  getTransactionDetails(txHash: string): Promise<TransactionDetails>;
+  
+  // Verify a Merkle root is anchored
+  verifyAnchor(merkleRoot: string, txHash: string): Promise<boolean>;
+  
+  // Get current credit cost per stamp
+  getCreditCost(): Promise<number>;
+}
 
-**Test setup:**
-- Create test account with API key
-- Create test stamps
-- Mock Redis/queue
+export interface TransactionStatus {
+  confirmed: boolean;
+  finalized: boolean;
+  blockNumber?: number;
+  confirmations?: number;
+  error?: string;
+}
+
+export interface TransactionDetails {
+  txHash: string;
+  blockNumber: number;
+  timestamp: string;
+  merkleRoot: string;
+  eventCount: number;
+}
+
+export function getChainAdapter(chain: string): ChainAdapter {
+  switch (chain) {
+    case 'solana':
+      return new SolanaAdapter();
+    case 'base':
+    case 'ethereum':
+    case 'arbitrum':
+      return new EVMAdapter(chain);
+    case 'bitcoin':
+      return new BitcoinAdapter();
+    default:
+      throw new Error(`Unsupported chain: ${chain}`);
+  }
+}
+```
+
+---
+
+### Story 4: Solana Adapter
+**File:** `packages/worker/src/chains/solana.ts`
+
+Implement Solana anchoring via memo program.
+
+**Memo format:** `vcot:v0.1:<merkle_root>:<event_count>:<timestamp>`
+
+```typescript
+import { Connection, Keypair, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
+import { createMemoInstruction } from '@solana/spl-memo';
+
+export class SolanaAdapter implements ChainAdapter {
+  readonly chain = 'solana';
+  private connection: Connection;
+  private keypair: Keypair;
+  
+  constructor() {
+    this.connection = new Connection(config.solanaRpcUrl);
+    this.keypair = Keypair.fromSecretKey(
+      bs58.decode(config.solanaPrivateKey)
+    );
+  }
+  
+  async anchor(merkleRoot: string, eventCount: number): Promise<string> {
+    const timestamp = Math.floor(Date.now() / 1000);
+    const memo = `vcot:v0.1:${merkleRoot}:${eventCount}:${timestamp}`;
+    
+    const transaction = new Transaction().add(
+      createMemoInstruction(memo)
+    );
+    
+    const signature = await sendAndConfirmTransaction(
+      this.connection,
+      transaction,
+      [this.keypair],
+      { commitment: 'confirmed' }
+    );
+    
+    return signature;
+  }
+  
+  async getTransactionStatus(txHash: string): Promise<TransactionStatus> {
+    const status = await this.connection.getSignatureStatus(txHash);
+    
+    return {
+      confirmed: status?.value?.confirmationStatus === 'confirmed' || 
+                 status?.value?.confirmationStatus === 'finalized',
+      finalized: status?.value?.confirmationStatus === 'finalized',
+      confirmations: status?.value?.confirmations ?? 0,
+      error: status?.value?.err?.toString(),
+    };
+  }
+  
+  async getTransactionDetails(txHash: string): Promise<TransactionDetails> {
+    const tx = await this.connection.getTransaction(txHash, {
+      commitment: 'finalized',
+    });
+    
+    if (!tx) {
+      throw new Error('Transaction not found');
+    }
+    
+    // Parse memo from transaction
+    const memoInstruction = tx.transaction.message.instructions.find(
+      ix => ix.programId.toString() === 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'
+    );
+    
+    const memoData = memoInstruction?.data;
+    const memo = Buffer.from(memoData as Buffer).toString('utf8');
+    const [, , merkleRoot, eventCount, timestamp] = memo.split(':');
+    
+    return {
+      txHash,
+      blockNumber: tx.slot,
+      timestamp: new Date(parseInt(timestamp) * 1000).toISOString(),
+      merkleRoot,
+      eventCount: parseInt(eventCount),
+    };
+  }
+  
+  async verifyAnchor(merkleRoot: string, txHash: string): Promise<boolean> {
+    try {
+      const details = await this.getTransactionDetails(txHash);
+      return details.merkleRoot === merkleRoot;
+    } catch {
+      return false;
+    }
+  }
+  
+  async getCreditCost(): Promise<number> {
+    // Solana = 1 credit per stamp
+    return 1;
+  }
+}
+```
+
+---
+
+### Story 5: EVM Adapter (EAS)
+**File:** `packages/worker/src/chains/evm.ts`
+
+Implement EVM anchoring via Ethereum Attestation Service.
+
+```typescript
+import { ethers } from 'ethers';
+import { EAS, SchemaEncoder } from '@ethereum-attestation-service/eas-sdk';
+
+const EAS_ADDRESSES: Record<string, string> = {
+  base: '0x4200000000000000000000000000000000000021',
+  ethereum: '0xA1207F3BBa224E2c9c3c6D5aF63D0eb1582Ce587',
+  arbitrum: '0xbD75f629A22Dc480D9470a94506ED',
+};
+
+const VCOT_SCHEMA_UID = '0x...'; // Will be registered
+
+export class EVMAdapter implements ChainAdapter {
+  readonly chain: string;
+  private provider: ethers.Provider;
+  private wallet: ethers.Wallet;
+  private eas: EAS;
+  
+  constructor(chain: string) {
+    this.chain = chain;
+    this.provider = new ethers.JsonRpcProvider(this.getRpcUrl(chain));
+    this.wallet = new ethers.Wallet(config.evmPrivateKey, this.provider);
+    this.eas = new EAS(EAS_ADDRESSES[chain]);
+    this.eas.connect(this.wallet);
+  }
+  
+  private getRpcUrl(chain: string): string {
+    switch (chain) {
+      case 'base': return config.baseRpcUrl;
+      case 'ethereum': return `https://eth-mainnet.g.alchemy.com/v2/${config.alchemyApiKey}`;
+      case 'arbitrum': return `https://arb-mainnet.g.alchemy.com/v2/${config.alchemyApiKey}`;
+      default: throw new Error(`Unknown EVM chain: ${chain}`);
+    }
+  }
+  
+  async anchor(merkleRoot: string, eventCount: number): Promise<string> {
+    const schemaEncoder = new SchemaEncoder(
+      'bytes32 merkleRoot,uint256 eventCount,uint256 timestamp'
+    );
+    
+    const encodedData = schemaEncoder.encodeData([
+      { name: 'merkleRoot', type: 'bytes32', value: merkleRoot },
+      { name: 'eventCount', type: 'uint256', value: eventCount },
+      { name: 'timestamp', type: 'uint256', value: Math.floor(Date.now() / 1000) },
+    ]);
+    
+    const tx = await this.eas.attest({
+      schema: VCOT_SCHEMA_UID,
+      data: {
+        recipient: ethers.ZeroAddress,
+        expirationTime: 0n,
+        revocable: false,
+        data: encodedData,
+      },
+    });
+    
+    const receipt = await tx.wait();
+    return receipt.hash;
+  }
+  
+  async getTransactionStatus(txHash: string): Promise<TransactionStatus> {
+    const receipt = await this.provider.getTransactionReceipt(txHash);
+    
+    if (!receipt) {
+      return { confirmed: false, finalized: false };
+    }
+    
+    const currentBlock = await this.provider.getBlockNumber();
+    const confirmations = currentBlock - receipt.blockNumber;
+    
+    return {
+      confirmed: confirmations >= 1,
+      finalized: confirmations >= 12, // EVM finality varies by chain
+      blockNumber: receipt.blockNumber,
+      confirmations,
+    };
+  }
+  
+  async verifyAnchor(merkleRoot: string, txHash: string): Promise<boolean> {
+    // Verify attestation exists and contains correct merkle root
+    try {
+      const tx = await this.provider.getTransaction(txHash);
+      // Parse attestation data...
+      return true; // Simplified
+    } catch {
+      return false;
+    }
+  }
+  
+  async getCreditCost(): Promise<number> {
+    switch (this.chain) {
+      case 'base': return 2;
+      case 'arbitrum': return 3;
+      case 'ethereum': return 20;
+      default: return 5;
+    }
+  }
+}
+```
+
+---
+
+### Story 6: Bitcoin Adapter
+**File:** `packages/worker/src/chains/bitcoin.ts`
+
+Implement Bitcoin anchoring via OP_RETURN.
+
+**OP_RETURN format:** `VCOT` + 32-byte merkle root (36 bytes total)
+
+```typescript
+import * as bitcoin from 'bitcoinjs-lib';
+
+export class BitcoinAdapter implements ChainAdapter {
+  readonly chain = 'bitcoin';
+  private network: bitcoin.Network;
+  
+  constructor() {
+    this.network = config.nodeEnv === 'production' 
+      ? bitcoin.networks.bitcoin 
+      : bitcoin.networks.testnet;
+  }
+  
+  async anchor(merkleRoot: string, eventCount: number): Promise<string> {
+    // Build OP_RETURN transaction
+    const prefix = Buffer.from('VCOT');
+    const rootBytes = Buffer.from(merkleRoot.replace('sha256:', ''), 'hex');
+    const data = Buffer.concat([prefix, rootBytes]);
+    
+    const embed = bitcoin.payments.embed({ data: [data] });
+    
+    // Build and sign transaction
+    // ... (requires UTXO management, signing, broadcasting)
+    
+    throw new Error('Bitcoin adapter not fully implemented');
+  }
+  
+  async getTransactionStatus(txHash: string): Promise<TransactionStatus> {
+    // Query Bitcoin node/API for transaction status
+    throw new Error('Bitcoin adapter not fully implemented');
+  }
+  
+  async verifyAnchor(merkleRoot: string, txHash: string): Promise<boolean> {
+    throw new Error('Bitcoin adapter not fully implemented');
+  }
+  
+  async getCreditCost(): Promise<number> {
+    return 50; // Bitcoin is most expensive
+  }
+}
+```
+
+**Note:** Bitcoin adapter is more complex due to UTXO management. Mark as TODO for full implementation.
+
+---
+
+### Story 7: Confirmation Checker
+**File:** `packages/worker/src/processors/confirmation.ts`
+
+Process confirmation check jobs.
+
+```typescript
+async function processConfirmationCheck(data: {
+  anchorId: string;
+  chain: string;
+  txHash: string;
+}): Promise<void> {
+  const adapter = getChainAdapter(data.chain);
+  const status = await adapter.getTransactionStatus(data.txHash);
+  
+  if (status.error) {
+    // Transaction failed - need to retry anchoring
+    await anchorRepo.update(data.anchorId, {
+      status: 'failed',
+      error: status.error,
+    });
+    return;
+  }
+  
+  if (status.finalized) {
+    // Update anchor to finalized
+    await anchorRepo.update(data.anchorId, {
+      status: 'finalized',
+      blockNumber: status.blockNumber,
+    });
+    
+    // Update all stamps to verified
+    const anchor = await anchorRepo.findById(data.anchorId);
+    await stampRepo.updateStatusByAnchor(data.anchorId, 'verified');
+    
+    return;
+  }
+  
+  if (status.confirmed) {
+    // Update anchor to confirmed
+    await anchorRepo.update(data.anchorId, {
+      status: 'confirmed',
+      blockNumber: status.blockNumber,
+    });
+  }
+  
+  // Not yet finalized - requeue check
+  const delay = status.confirmed ? 60000 : 30000; // 1 min if confirmed, 30s if not
+  await confirmationQueue.add('check-confirmation', data, { delay });
+}
+```
+
+---
+
+### Story 8: Merkle Batching Service
+**File:** `packages/worker/src/services/batching.ts`
+
+Service for managing batch windows.
+
+```typescript
+export class BatchingService {
+  private pendingBatch: Map<string, string[]> = new Map(); // chain -> stampIds
+  private batchTimers: Map<string, NodeJS.Timeout> = new Map();
+  
+  async addToBatch(stampId: string, chain: string): Promise<void> {
+    if (!this.pendingBatch.has(chain)) {
+      this.pendingBatch.set(chain, []);
+    }
+    
+    this.pendingBatch.get(chain)!.push(stampId);
+    
+    // Start timer if first item
+    if (this.pendingBatch.get(chain)!.length === 1) {
+      this.startBatchTimer(chain);
+    }
+    
+    // Flush if batch size reached
+    if (this.pendingBatch.get(chain)!.length >= config.anchorBatchSize) {
+      await this.flushBatch(chain);
+    }
+  }
+  
+  private startBatchTimer(chain: string): void {
+    const timer = setTimeout(async () => {
+      await this.flushBatch(chain);
+    }, config.anchorTimeWindowMs);
+    
+    this.batchTimers.set(chain, timer);
+  }
+  
+  async flushBatch(chain: string): Promise<void> {
+    const stampIds = this.pendingBatch.get(chain) ?? [];
+    if (stampIds.length === 0) return;
+    
+    // Clear pending
+    this.pendingBatch.set(chain, []);
+    
+    // Clear timer
+    const timer = this.batchTimers.get(chain);
+    if (timer) {
+      clearTimeout(timer);
+      this.batchTimers.delete(chain);
+    }
+    
+    // Queue anchor job
+    await anchorQueue.add('anchor-batch', {
+      stampIds,
+      chain,
+    });
+  }
+}
+```
+
+---
+
+### Story 9: Anchor Repository
+**File:** `packages/worker/src/repositories/anchors.ts`
+
+Database access for anchors.
+
+```typescript
+export class AnchorRepository {
+  async insert(data: NewAnchor): Promise<Anchor> {
+    const [anchor] = await db.insert(anchors).values(data).returning();
+    return anchor;
+  }
+  
+  async findById(id: string): Promise<Anchor | null> {
+    return await db.query.anchors.findFirst({
+      where: eq(anchors.id, id),
+    });
+  }
+  
+  async findByMerkleRoot(root: string): Promise<Anchor | null> {
+    return await db.query.anchors.findFirst({
+      where: eq(anchors.merkleRoot, root),
+    });
+  }
+  
+  async update(id: string, data: Partial<Anchor>): Promise<void> {
+    await db.update(anchors).set(data).where(eq(anchors.id, id));
+  }
+  
+  async findPending(): Promise<Anchor[]> {
+    return await db.query.anchors.findMany({
+      where: eq(anchors.status, 'pending'),
+    });
+  }
+  
+  async findByChain(chain: string, options: QueryOptions): Promise<Anchor[]> {
+    return await db.query.anchors.findMany({
+      where: eq(anchors.chain, chain),
+      limit: options.limit,
+      offset: options.offset,
+      orderBy: desc(anchors.createdAt),
+    });
+  }
+}
+```
+
+---
+
+### Story 10: Worker Docker Setup
+**File:** `packages/worker/Dockerfile`
+
+Docker setup for worker.
+
+```dockerfile
+FROM node:20-alpine AS base
+RUN corepack enable
+
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/core/package.json ./packages/core/
+COPY packages/worker/package.json ./packages/worker/
+RUN pnpm install --frozen-lockfile
+
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/packages/core/node_modules ./packages/core/node_modules
+COPY --from=deps /app/packages/worker/node_modules ./packages/worker/node_modules
+COPY . .
+RUN pnpm turbo build --filter=@memstamp/worker
+
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 memstamp
+COPY --from=builder --chown=memstamp:nodejs /app/packages/worker/dist ./dist
+COPY --from=builder --chown=memstamp:nodejs /app/packages/worker/package.json ./
+USER memstamp
+CMD ["node", "dist/index.js"]
+```
+
+---
+
+### Story 11: Chain Costs Endpoint
+**File:** `packages/api/src/routes/public.ts`
+
+Implement `GET /v1/chains` endpoint.
+
+**Response:**
+```typescript
+{
+  chains: Array<{
+    id: string;
+    name: string;
+    credits_per_stamp: number;
+    status: 'active' | 'maintenance' | 'deprecated';
+    avg_finality_seconds: number;
+  }>;
+  default_chain: string;
+}
+```
+
+**Implementation:**
+```typescript
+app.get('/v1/chains', async () => {
+  return {
+    chains: [
+      {
+        id: 'solana',
+        name: 'Solana',
+        credits_per_stamp: 1,
+        status: 'active',
+        avg_finality_seconds: 0.4,
+      },
+      {
+        id: 'base',
+        name: 'Base',
+        credits_per_stamp: 2,
+        status: 'active',
+        avg_finality_seconds: 2,
+      },
+      {
+        id: 'bitcoin',
+        name: 'Bitcoin',
+        credits_per_stamp: 50,
+        status: 'active',
+        avg_finality_seconds: 600,
+      },
+    ],
+    default_chain: config.defaultChain,
+  };
+});
+```
+
+---
+
+### Story 12: Worker Health & Metrics
+**File:** `packages/worker/src/health.ts`
+
+Add health check and metrics endpoint for worker.
+
+```typescript
+import Fastify from 'fastify';
+
+const healthServer = Fastify();
+
+healthServer.get('/health', async () => {
+  // Check Redis connection
+  const redisOk = await redis.ping() === 'PONG';
+  
+  // Check queue stats
+  const waiting = await anchorQueue.getWaitingCount();
+  const active = await anchorQueue.getActiveCount();
+  
+  return {
+    status: redisOk ? 'ok' : 'degraded',
+    redis: redisOk ? 'ok' : 'error',
+    queue: {
+      waiting,
+      active,
+    },
+    timestamp: new Date().toISOString(),
+  };
+});
+
+healthServer.get('/metrics', async () => {
+  const completed = await anchorQueue.getCompletedCount();
+  const failed = await anchorQueue.getFailedCount();
+  
+  return {
+    jobs_completed: completed,
+    jobs_failed: failed,
+    uptime_seconds: process.uptime(),
+  };
+});
+
+export async function startHealthServer(): Promise<void> {
+  await healthServer.listen({ port: 8011, host: '0.0.0.0' });
+  console.log('Worker health server on port 8011');
+}
+```
 
 ---
 
 ## Completion Criteria
 
-- [ ] All 14 stories implemented
-- [ ] All endpoints tested
-- [ ] Status transitions correct
-- [ ] Hash chain validation works
-- [ ] Gap detection works
-- [ ] Queue integration working
-- [ ] Pagination working
-- [ ] Error handling correct
+- [ ] All 12 stories implemented
+- [ ] Worker processes anchor jobs
+- [ ] Solana adapter functional
+- [ ] EVM adapter functional (Base at minimum)
+- [ ] Merkle batching working
+- [ ] Confirmation tracking working
+- [ ] Worker health endpoint
+- [ ] Docker build succeeds
+- [ ] Integration tests pass (with devnet)
