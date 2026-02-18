@@ -1,5 +1,6 @@
 ## Codebase Patterns
-- Use `NODE_ENV=development` when running pnpm install, build, or test (env defaults to production)
+- Use `NODE_ENV=development` when running pnpm install (env defaults to production in this environment)
+- Merkle proof generation: when a leaf has no sibling (odd count), use self-duplication (same as buildMerkleTree)
 - Core package uses tsup for build, vitest for tests
 - Hash format is always `sha256:<64-hex-chars>`
 - Use Node.js built-in `crypto` for SHA-256, `@noble/ed25519` for signing
@@ -24,4 +25,22 @@
   - `@noble/ed25519` uses async APIs (`signAsync`, `verifyAsync`, `getPublicKeyAsync`)
   - Schema validates `event_id` as UUID format — UUIDv7 is compatible
   - `computeEventHash` uses pipe-delimited fields: `event_id|event_type|timestamp|agent_id|content_hash|previous_hash`
+---
+
+## 2026-02-18 - P11-01-13 - Package Build & Exports
+- Verified all exports from index.ts match spec requirements
+- Build produces dist/index.js (CJS), dist/index.mjs (ESM), dist/index.d.ts (types)
+- No name conflicts between ValidationResult and VerificationResult
+---
+
+## 2026-02-18 - P11-01-14 - Comprehensive Test Suite
+- Created 5 test files: merkle, signing, validation, event, integration
+- Total: 69 tests, all passing
+- Fixed Merkle proof generation bug: `generateMerkleProof` was skipping sibling when last leaf had no pair (odd count). Fix: use self-duplication to match `buildMerkleTree` behavior
+- Files changed: `packages/core/src/merkle.ts`, `packages/core/tests/*.test.ts` (5 new)
+- **Learnings for future iterations:**
+  - Merkle tree odd-leaf duplication must be consistent between `buildMerkleTree`, `computeMerkleRoot`, and `generateMerkleProof`
+  - Ed25519 signing is deterministic — same key+message always produces the same signature
+  - Schema `additionalProperties: false` is NOT set on the schema (metadata is allowed as additional property)
+  - Integration tests that create event chains must use content_hash as the link (not event hash)
 ---

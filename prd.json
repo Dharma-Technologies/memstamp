@@ -85,7 +85,7 @@
       "id": "P11-01-14",
       "title": "Comprehensive Test Suite",
       "file": "packages/core/tests/",
-      "passes": false
+      "passes": true
     }
   ]
 }
