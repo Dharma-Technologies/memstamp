@@ -269,507 +269,613 @@ EVM_PRIVATE_KEY=xxx     # 0x prefixed
 
 ---
 
-## Current Stage: P11-01-core-schema
+## Current Stage: P11-02-api-foundation
 
-# P11-01: Core Schema & Library
+# P11-02: API Foundation
 
-**Phase 1 — Foundation**
+**Phase 2 — API Server Setup**
 
-Build the core @memstamp/core library: VCOT schema, hashing, Merkle trees, and Ed25519 signing. This is the protocol foundation — every line of code matters.
+Build the Fastify API server with database models, authentication, and foundational endpoints.
 
 ---
 
 ## Stories
 
-### Story 1: VCOT TypeScript Types
-**File:** `packages/core/src/types.ts`
+### Story 1: Fastify Server Setup
+**File:** `packages/api/src/index.ts`
 
-Define all TypeScript types for the VCOT schema.
+Set up the Fastify server with essential plugins.
 
-**Types to define:**
+**Plugins to configure:**
+- `@fastify/cors` — CORS headers
+- `@fastify/helmet` — Security headers
+- `@fastify/rate-limit` — Rate limiting
+- `@fastify/swagger` — OpenAPI generation
+- `@fastify/swagger-ui` — Swagger UI
+
+**Configuration:**
 ```typescript
-export const VCOT_VERSION = 'vcot/0.1' as const;
+const app = Fastify({
+  logger: {
+    level: config.nodeEnv === 'production' ? 'info' : 'debug',
+  },
+});
 
-export type VCOTEventType =
-  | 'decision'
-  | 'tool_call'
-  | 'tool_result'
-  | 'memory_write'
-  | 'memory_read'
-  | 'external_action'
-  | 'state_change'
-  | 'observation'
-  | 'custom';
+// CORS
+await app.register(cors, {
+  origin: config.corsOrigins,
+});
 
-export interface VCOTEvent {
-  version: typeof VCOT_VERSION;
-  event_id: string;
-  event_type: VCOTEventType;
-  timestamp: string;
-  agent_id: string;
-  content_hash: string;
-  previous_hash: string;
-  framework: string;
-  signature: string;
-  metadata?: Record<string, unknown>;
-}
+// Security headers
+await app.register(helmet);
 
-export interface VCOTEventInput {
-  event_type: VCOTEventType;
-  agent_id: string;
-  content: unknown;
-  framework?: string;
-  metadata?: Record<string, unknown>;
-}
+// Rate limiting
+await app.register(rateLimit, {
+  max: 100,
+  timeWindow: '1 minute',
+});
 
-export interface MerkleNode {
-  hash: string;
-  left?: MerkleNode;
-  right?: MerkleNode;
-}
+// Swagger
+await app.register(swagger, {
+  openapi: {
+    info: {
+      title: 'memstamp API',
+      version: '0.1.0',
+    },
+    servers: [{ url: config.apiUrl }],
+    components: {
+      securitySchemes: {
+        apiKey: {
+          type: 'apiKey',
+          name: 'Authorization',
+          in: 'header',
+        },
+      },
+    },
+  },
+});
 
-export interface MerkleProof {
-  leaf: string;
-  proof: Array<{
-    hash: string;
-    position: 'left' | 'right';
-  }>;
-  root: string;
-}
-
-export interface AnchorRecord {
-  id: string;
-  merkle_root: string;
-  event_count: number;
-  time_range: {
-    start: string;
-    end: string;
-  };
-  chain: string;
-  tx_hash: string;
-  block_number?: number;
-  status: 'pending' | 'confirmed' | 'finalized';
-  created_at: string;
-}
-
-export interface VerificationResult {
-  verified: boolean;
-  event_id: string;
-  content_hash: string;
-  merkle_root: string;
-  anchor?: AnchorRecord;
-  chain_verified: boolean;
-  signature_verified: boolean;
-  hash_chain_valid: boolean;
-  error?: string;
-}
+await app.register(swaggerUi, {
+  routePrefix: '/docs',
+});
 ```
 
 ---
 
-### Story 2: JSON Schema Definition
-**File:** `schemas/vcot-v1.json`
+### Story 2: Configuration Module
+**File:** `packages/api/src/config.ts`
 
-Create the JSON Schema for VCOT v0.1 events.
+Create typed configuration from environment variables.
 
-**Schema requirements:**
-- `$schema`: "http://json-schema.org/draft-07/schema#"
-- `$id`: "https://memstamp.io/schemas/vcot-v1.json"
-- All required fields with correct types
-- `content_hash` pattern: `^sha256:[a-f0-9]{64}$`
-- `previous_hash` pattern: `^sha256:[a-f0-9]{64}$`
-- `timestamp` format: date-time
-- `event_type` enum with all 9 types
-- `additionalProperties`: false
+**Config structure:**
+```typescript
+import { z } from 'zod';
+
+const envSchema = z.object({
+  PORT: z.string().default('8010'),
+  NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
+  DATABASE_URL: z.string().url(),
+  REDIS_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+  API_URL: z.string().url().default('http://localhost:8010'),
+  CORS_ORIGINS: z.string().default('*'),
+  
+  // Chain configuration
+  HELIUS_API_KEY: z.string().optional(),
+  ALCHEMY_API_KEY: z.string().optional(),
+  SOLANA_RPC_URL: z.string().url().optional(),
+  SOLANA_PRIVATE_KEY: z.string().optional(),
+  BASE_RPC_URL: z.string().url().optional(),
+  EVM_PRIVATE_KEY: z.string().optional(),
+  
+  // Anchoring
+  ANCHOR_BATCH_SIZE: z.string().default('1000'),
+  ANCHOR_TIME_WINDOW_MS: z.string().default('300000'),
+  DEFAULT_CHAIN: z.string().default('solana'),
+});
+
+export const config = envSchema.parse(process.env);
+```
+
+**Error handling:**
+- If validation fails, log missing/invalid vars and exit
 
 ---
 
-### Story 3: Canonical JSON Serialization
-**File:** `packages/core/src/hash.ts`
+### Story 3: Database Connection (Drizzle)
+**File:** `packages/api/src/database/connection.ts`
 
-Implement canonical JSON serialization for deterministic hashing.
-
-**Requirements:**
-- Sort object keys alphabetically (recursive)
-- No whitespace
-- UTF-8 encoding
-- Handle nested objects
-- Preserve array order (don't sort arrays)
-- Handle null, boolean, number, string correctly
-
-**Function:**
-```typescript
-export function canonicalJson(obj: unknown): string
-```
-
-**Test cases:**
-- `{b: 1, a: 2}` → `{"a":2,"b":1}`
-- `{b: {z: 1, a: 2}, a: 1}` → `{"a":1,"b":{"a":2,"z":1}}`
-- `{arr: [3, 1, 2]}` → `{"arr":[3,1,2]}` (array order preserved)
-
----
-
-### Story 4: SHA-256 Hash Computation
-**File:** `packages/core/src/hash.ts`
-
-Implement content hashing with SHA-256.
-
-**Functions:**
-```typescript
-// Compute content hash
-export function computeHash(content: unknown): string
-// Returns: "sha256:<64-char-hex>"
-
-// Compute event hash for chaining
-export function computeEventHash(
-  eventId: string,
-  eventType: string,
-  timestamp: string,
-  agentId: string,
-  contentHash: string,
-  previousHash: string
-): string
-// Hash of: event_id|event_type|timestamp|agent_id|content_hash|previous_hash
-
-// Genesis hash constant
-export const GENESIS_HASH = 'sha256:' + '0'.repeat(64);
-```
-
-**Implementation:**
-- Use Node.js `crypto.createHash('sha256')`
-- Content hash: SHA-256 of canonical JSON
-- Event hash: SHA-256 of pipe-delimited fields
-
-**Tests:**
-- Same content → same hash
-- Different key order → same hash
-- Different content → different hash
-- Genesis hash is 64 zeros with sha256: prefix
-
----
-
-### Story 5: Merkle Tree Construction
-**File:** `packages/core/src/merkle.ts`
-
-Implement Merkle tree building from leaf hashes.
-
-**Functions:**
-```typescript
-// Build full tree from leaves
-export function buildMerkleTree(leaves: string[]): MerkleNode | null
-
-// Just compute root (more efficient if full tree not needed)
-export function computeMerkleRoot(leaves: string[]): string
-```
-
-**Algorithm:**
-1. Create leaf nodes from input hashes
-2. If odd number, duplicate last leaf
-3. Combine pairs: `hash(left + right)` where + is hex concatenation
-4. Repeat until single root
-
-**Edge cases:**
-- Empty array → null/empty string
-- Single leaf → that leaf is the root
-- Two leaves → one level
-- Odd number → duplicate last leaf
-
-**Tests:**
-- Empty array
-- Single element
-- Two elements
-- Odd number of elements
-- Power of 2 elements
-- Large array (1000+ elements)
-
----
-
-### Story 6: Merkle Proof Generation
-**File:** `packages/core/src/merkle.ts`
-
-Implement Merkle proof generation for individual leaves.
-
-**Function:**
-```typescript
-export function generateMerkleProof(
-  leaves: string[],
-  leafIndex: number
-): MerkleProof | null
-```
-
-**Proof structure:**
-```typescript
-{
-  leaf: "sha256:xxx",           // The leaf being proved
-  proof: [
-    { hash: "sha256:xxx", position: "right" },  // Sibling at level 0
-    { hash: "sha256:xxx", position: "left" },   // Sibling at level 1
-    // ... up to root
-  ],
-  root: "sha256:xxx"            // The merkle root
-}
-```
-
-**Tests:**
-- Generate proof for first, middle, last leaf
-- Proof for single-element tree
-- Proof for odd-numbered tree
-- Invalid index returns null
-
----
-
-### Story 7: Merkle Proof Verification
-**File:** `packages/core/src/merkle.ts`
-
-Implement Merkle proof verification.
-
-**Function:**
-```typescript
-export function verifyMerkleProof(proof: MerkleProof): boolean
-```
-
-**Algorithm:**
-1. Start with leaf hash
-2. For each step in proof:
-   - If position is 'left', hash = SHA256(step.hash + current)
-   - If position is 'right', hash = SHA256(current + step.hash)
-3. Final hash should equal proof.root
-
-**Tests:**
-- Valid proof verifies true
-- Tampered leaf verifies false
-- Tampered proof step verifies false
-- Tampered root verifies false
-- Wrong position verifies false
-
----
-
-### Story 8: Ed25519 Key Generation
-**File:** `packages/core/src/signing.ts`
-
-Implement Ed25519 key pair generation.
-
-**Dependency:** `@noble/ed25519`
-
-**Function:**
-```typescript
-export async function generateKeyPair(): Promise<{
-  publicKey: string;   // hex-encoded
-  privateKey: string;  // hex-encoded
-}>
-```
-
-**Tests:**
-- Generated keys are correct length
-- Different calls generate different keys
-- Keys can be used for signing/verification
-
----
-
-### Story 9: Ed25519 Signing
-**File:** `packages/core/src/signing.ts`
-
-Implement event hash signing.
-
-**Function:**
-```typescript
-export async function signEventHash(
-  eventHash: string,    // sha256:xxx
-  privateKey: string    // hex-encoded
-): Promise<string>      // signature, hex-encoded
-```
-
-**Implementation:**
-- Strip "sha256:" prefix from event hash
-- Convert hash hex to bytes
-- Sign with @noble/ed25519
-- Return hex-encoded signature
-
-**Tests:**
-- Signing produces consistent output for same inputs
-- Signature is correct length (128 hex chars = 64 bytes)
-
----
-
-### Story 10: Ed25519 Verification
-**File:** `packages/core/src/signing.ts`
-
-Implement signature verification.
-
-**Function:**
-```typescript
-export async function verifySignature(
-  eventHash: string,    // sha256:xxx
-  signature: string,    // hex-encoded
-  publicKey: string     // hex-encoded
-): Promise<boolean>
-```
-
-**Tests:**
-- Valid signature verifies true
-- Wrong hash verifies false
-- Wrong signature verifies false
-- Wrong public key verifies false
-- Malformed inputs return false (not throw)
-
----
-
-### Story 11: VCOT Event Validation
-**File:** `packages/core/src/validation.ts`
-
-Implement VCOT event validation using JSON Schema.
-
-**Dependency:** `ajv`, `ajv-formats`
-
-**Functions:**
-```typescript
-export interface ValidationResult {
-  valid: boolean;
-  errors?: string[];
-}
-
-export function validateVCOTEvent(event: unknown): ValidationResult
-
-export function validateHashChain(
-  events: VCOTEvent[],
-  genesisHash: string
-): ValidationResult
-```
-
-**validateVCOTEvent:**
-- Load vcot-v1.json schema
-- Validate event against schema
-- Return errors if invalid
-
-**validateHashChain:**
-- First event must reference genesis hash
-- Each subsequent event must reference previous event's hash
-- Return which link is broken if invalid
-
-**Tests:**
-- Valid event passes
-- Missing required field fails
-- Invalid hash format fails
-- Invalid event_type fails
-- Valid chain passes
-- Broken chain link detected
-- Empty chain is valid
-
----
-
-### Story 12: VCOT Event Creation Helper
-**File:** `packages/core/src/event.ts`
-
-Implement helper function to create valid VCOT events.
-
-**Function:**
-```typescript
-export async function createVCOTEvent(
-  input: VCOTEventInput,
-  previousHash: string,
-  privateKey: string
-): Promise<VCOTEvent>
-```
-
-**Implementation:**
-1. Generate UUIDv7 for event_id
-2. Get current ISO 8601 timestamp
-3. Compute content_hash from input.content
-4. Compute event_hash from all fields
-5. Sign event_hash with private key
-6. Return complete VCOTEvent
+Set up Drizzle ORM with PostgreSQL.
 
 **Dependencies:**
-- Add `uuidv7` package or implement UUIDv7
+- `drizzle-orm`
+- `pg`
+- `drizzle-kit` (dev)
 
-**Tests:**
-- Creates valid event that passes validation
-- Events chain correctly
-- Timestamps are valid ISO 8601
-- Content hash is deterministic
-
----
-
-### Story 13: Package Build & Exports
-**Files:** 
-- `packages/core/src/index.ts`
-- `packages/core/package.json`
-- `packages/core/tsconfig.json`
-
-Set up proper exports and build configuration.
-
-**index.ts exports:**
+**Connection:**
 ```typescript
-// Types
-export * from './types';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { Pool } from 'pg';
+import * as schema from './schema';
 
-// Schema
-export { VCOT_SCHEMA_V1 } from './schema';
+const pool = new Pool({
+  connectionString: config.databaseUrl,
+});
 
-// Hashing
-export { computeHash, computeEventHash, canonicalJson, GENESIS_HASH } from './hash';
-
-// Merkle
-export { buildMerkleTree, computeMerkleRoot, generateMerkleProof, verifyMerkleProof } from './merkle';
-
-// Signing
-export { generateKeyPair, signEventHash, verifySignature } from './signing';
-
-// Validation
-export { validateVCOTEvent, validateHashChain } from './validation';
-
-// Event creation
-export { createVCOTEvent } from './event';
+export const db = drizzle(pool, { schema });
 ```
 
-**package.json:**
-- Build with tsup
-- Export CJS and ESM
-- Export types
-- Specify peer dependencies
+**drizzle.config.ts:**
+```typescript
+import type { Config } from 'drizzle-kit';
 
-**Build verification:**
-```bash
-cd packages/core
-pnpm build
-# Verify dist/index.js, dist/index.mjs, dist/index.d.ts exist
+export default {
+  schema: './src/database/schema.ts',
+  out: './drizzle',
+  driver: 'pg',
+  dbCredentials: {
+    connectionString: process.env.DATABASE_URL!,
+  },
+} satisfies Config;
 ```
 
 ---
 
-### Story 14: Comprehensive Test Suite
-**File:** `packages/core/tests/`
+### Story 4: Database Schema — Accounts
+**File:** `packages/api/src/database/schema.ts`
 
-Create comprehensive tests for all core functionality.
+Define the accounts table.
 
-**Test files:**
-- `hash.test.ts` — canonical JSON, SHA-256
-- `merkle.test.ts` — tree building, proofs, verification
-- `signing.test.ts` — key generation, signing, verification
-- `validation.test.ts` — schema validation, chain validation
-- `event.test.ts` — event creation, chaining
-- `integration.test.ts` — end-to-end workflows
+```typescript
+import { pgTable, uuid, text, integer, timestamp, pgEnum } from 'drizzle-orm/pg-core';
 
-**integration.test.ts scenarios:**
-1. Create chain of 10 events
-2. Build Merkle tree from chain
-3. Generate and verify proofs
-4. Verify all signatures
-5. Validate hash chain integrity
+export const tierEnum = pgEnum('tier', ['free', 'pro', 'enterprise']);
 
-**Run tests:**
+export const accounts = pgTable('accounts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  email: text('email').notNull().unique(),
+  apiKeyHash: text('api_key_hash').notNull().unique(),
+  apiKeyPrefix: text('api_key_prefix').notNull(), // First 8 chars for identification
+  credits: integer('credits').notNull().default(500), // Free tier starts with 500
+  tier: tierEnum('tier').notNull().default('free'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
+```
+
+---
+
+### Story 5: Database Schema — Stamps
+**File:** `packages/api/src/database/schema.ts`
+
+Define the stamps table.
+
+```typescript
+export const stampStatusEnum = pgEnum('stamp_status', ['pending', 'anchored', 'verified']);
+
+export const stamps = pgTable('stamps', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  accountId: uuid('account_id').notNull().references(() => accounts.id),
+  eventId: text('event_id').notNull().unique(),
+  agentId: text('agent_id').notNull(),
+  eventType: text('event_type').notNull(),
+  contentHash: text('content_hash').notNull(),
+  previousHash: text('previous_hash').notNull(),
+  framework: text('framework').notNull(),
+  signature: text('signature').notNull(),
+  status: stampStatusEnum('status').notNull().default('pending'),
+  anchorId: uuid('anchor_id').references(() => anchors.id),
+  merkleIndex: integer('merkle_index'), // Position in Merkle tree
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  agentIdIdx: index('stamps_agent_id_idx').on(table.agentId),
+  accountIdIdx: index('stamps_account_id_idx').on(table.accountId),
+  statusIdx: index('stamps_status_idx').on(table.status),
+  createdAtIdx: index('stamps_created_at_idx').on(table.createdAt),
+}));
+```
+
+---
+
+### Story 6: Database Schema — Anchors
+**File:** `packages/api/src/database/schema.ts`
+
+Define the anchors table.
+
+```typescript
+export const anchorStatusEnum = pgEnum('anchor_status', ['pending', 'confirmed', 'finalized']);
+
+export const anchors = pgTable('anchors', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  merkleRoot: text('merkle_root').notNull().unique(),
+  eventCount: integer('event_count').notNull(),
+  startTime: timestamp('start_time').notNull(),
+  endTime: timestamp('end_time').notNull(),
+  chain: text('chain').notNull(), // solana, base, bitcoin, etc.
+  txHash: text('tx_hash'),
+  blockNumber: integer('block_number'),
+  status: anchorStatusEnum('status').notNull().default('pending'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  merkleRootIdx: index('anchors_merkle_root_idx').on(table.merkleRoot),
+  chainIdx: index('anchors_chain_idx').on(table.chain),
+  statusIdx: index('anchors_status_idx').on(table.status),
+}));
+```
+
+---
+
+### Story 7: Database Schema — Credit Transactions
+**File:** `packages/api/src/database/schema.ts`
+
+Define the credit transactions table.
+
+```typescript
+export const creditTypeEnum = pgEnum('credit_type', ['purchase', 'deduct', 'refund', 'bonus']);
+
+export const creditTransactions = pgTable('credit_transactions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  accountId: uuid('account_id').notNull().references(() => accounts.id),
+  amount: integer('amount').notNull(), // Positive for credits, negative for debits
+  type: creditTypeEnum('type').notNull(),
+  reason: text('reason').notNull(),
+  stampId: uuid('stamp_id').references(() => stamps.id), // Optional reference
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  accountIdIdx: index('credit_tx_account_id_idx').on(table.accountId),
+}));
+```
+
+---
+
+### Story 8: Generate Initial Migration
+**Command:** Run Drizzle migration generation
+
 ```bash
-cd packages/core
-pnpm test
+cd packages/api
+pnpm db:generate
+```
+
+**Verify:**
+- Migration file created in `drizzle/` directory
+- Migration includes all tables and indexes
+- Enums created before tables
+
+---
+
+### Story 9: API Key Authentication Middleware
+**File:** `packages/api/src/middleware/auth.ts`
+
+Implement API key authentication.
+
+**API Key Format:** `ms_live_<random32chars>` or `ms_test_<random32chars>`
+
+**Functions:**
+```typescript
+import { createHash } from 'crypto';
+
+// Hash API key for storage
+export function hashApiKey(apiKey: string): string {
+  return createHash('sha256').update(apiKey).digest('hex');
+}
+
+// Extract prefix (for identification without exposing full key)
+export function getApiKeyPrefix(apiKey: string): string {
+  return apiKey.substring(0, 8);
+}
+
+// Generate new API key
+export function generateApiKey(isTest: boolean = false): string {
+  const prefix = isTest ? 'ms_test_' : 'ms_live_';
+  const random = crypto.randomBytes(24).toString('base64url');
+  return `${prefix}${random}`;
+}
+```
+
+**Middleware:**
+```typescript
+export const authMiddleware: FastifyPluginAsync = async (app) => {
+  app.addHook('onRequest', async (request, reply) => {
+    const authHeader = request.headers.authorization;
+    
+    if (!authHeader?.startsWith('Bearer ')) {
+      throw app.httpErrors.unauthorized('Missing API key');
+    }
+    
+    const apiKey = authHeader.substring(7);
+    const hash = hashApiKey(apiKey);
+    
+    const account = await db.query.accounts.findFirst({
+      where: eq(accounts.apiKeyHash, hash),
+    });
+    
+    if (!account) {
+      throw app.httpErrors.unauthorized('Invalid API key');
+    }
+    
+    request.account = account;
+  });
+};
+```
+
+**TypeScript declaration:**
+```typescript
+declare module 'fastify' {
+  interface FastifyRequest {
+    account: typeof accounts.$inferSelect;
+  }
+}
+```
+
+---
+
+### Story 10: Health Check Endpoint
+**File:** `packages/api/src/routes/health.ts`
+
+Implement health check endpoint.
+
+```typescript
+export const healthRoutes: FastifyPluginAsync = async (app) => {
+  app.get('/health', {
+    schema: {
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            status: { type: 'string' },
+            timestamp: { type: 'string' },
+            database: { type: 'string' },
+            redis: { type: 'string' },
+          },
+        },
+      },
+    },
+  }, async () => {
+    // Check database
+    let dbStatus = 'ok';
+    try {
+      await db.execute(sql`SELECT 1`);
+    } catch {
+      dbStatus = 'error';
+    }
+    
+    // Check Redis
+    let redisStatus = 'ok';
+    try {
+      await redis.ping();
+    } catch {
+      redisStatus = 'error';
+    }
+    
+    return {
+      status: dbStatus === 'ok' && redisStatus === 'ok' ? 'ok' : 'degraded',
+      timestamp: new Date().toISOString(),
+      database: dbStatus,
+      redis: redisStatus,
+    };
+  });
+};
+```
+
+---
+
+### Story 11: Redis Connection
+**File:** `packages/api/src/services/redis.ts`
+
+Set up Redis connection with IORedis.
+
+```typescript
+import IORedis from 'ioredis';
+import { config } from '../config';
+
+export const redis = new IORedis(config.redisUrl, {
+  maxRetriesPerRequest: null, // Required for BullMQ
+  enableReadyCheck: false,
+});
+
+redis.on('error', (err) => {
+  console.error('Redis error:', err);
+});
+
+redis.on('connect', () => {
+  console.log('Redis connected');
+});
+```
+
+---
+
+### Story 12: Error Handling
+**File:** `packages/api/src/errors.ts`
+
+Define custom error types and error handler.
+
+```typescript
+export class AppError extends Error {
+  constructor(
+    message: string,
+    public statusCode: number = 500,
+    public code: string = 'INTERNAL_ERROR'
+  ) {
+    super(message);
+    this.name = 'AppError';
+  }
+}
+
+export class ValidationError extends AppError {
+  constructor(message: string, public errors?: string[]) {
+    super(message, 400, 'VALIDATION_ERROR');
+  }
+}
+
+export class AuthenticationError extends AppError {
+  constructor(message: string = 'Authentication required') {
+    super(message, 401, 'AUTHENTICATION_ERROR');
+  }
+}
+
+export class InsufficientCreditsError extends AppError {
+  constructor(required: number, available: number) {
+    super(`Insufficient credits. Required: ${required}, Available: ${available}`, 402, 'INSUFFICIENT_CREDITS');
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(resource: string) {
+    super(`${resource} not found`, 404, 'NOT_FOUND');
+  }
+}
+```
+
+**Error handler plugin:**
+```typescript
+export const errorHandler: FastifyPluginAsync = async (app) => {
+  app.setErrorHandler((error, request, reply) => {
+    if (error instanceof AppError) {
+      return reply.status(error.statusCode).send({
+        error: error.code,
+        message: error.message,
+        ...(error instanceof ValidationError && error.errors ? { errors: error.errors } : {}),
+      });
+    }
+    
+    // Log unexpected errors
+    request.log.error(error);
+    
+    return reply.status(500).send({
+      error: 'INTERNAL_ERROR',
+      message: 'An unexpected error occurred',
+    });
+  });
+};
+```
+
+---
+
+### Story 13: Request Validation with Zod
+**File:** `packages/api/src/schemas/index.ts`
+
+Define Zod schemas for request validation.
+
+```typescript
+import { z } from 'zod';
+
+// Common schemas
+export const uuidSchema = z.string().uuid();
+export const hashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
+export const eventTypeSchema = z.enum([
+  'decision', 'tool_call', 'tool_result', 'memory_write',
+  'memory_read', 'external_action', 'state_change', 'observation', 'custom'
+]);
+
+// Pagination
+export const paginationSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+// Create stamp request
+export const createStampSchema = z.object({
+  agent_id: z.string().min(1).max(256),
+  event_type: eventTypeSchema,
+  content_hash: hashSchema,
+  previous_hash: hashSchema.optional(),
+  framework: z.string().min(1).max(64).default('unknown'),
+  signature: z.string().min(1),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+// Batch create stamps
+export const batchCreateStampsSchema = z.object({
+  stamps: z.array(createStampSchema).min(1).max(1000),
+});
+```
+
+---
+
+### Story 14: Route Registration
+**File:** `packages/api/src/routes/index.ts`
+
+Set up route registration with prefixes.
+
+```typescript
+import { FastifyPluginAsync } from 'fastify';
+import { healthRoutes } from './health';
+import { stampsRoutes } from './stamps';
+import { accountRoutes } from './account';
+import { anchorsRoutes } from './anchors';
+import { publicRoutes } from './public';
+
+export const registerRoutes: FastifyPluginAsync = async (app) => {
+  // Public routes (no auth)
+  await app.register(healthRoutes);
+  await app.register(publicRoutes, { prefix: '/v1' });
+  
+  // Authenticated routes
+  await app.register(async (authenticatedApp) => {
+    await authenticatedApp.register(authMiddleware);
+    await authenticatedApp.register(stampsRoutes, { prefix: '/v1/stamps' });
+    await authenticatedApp.register(accountRoutes, { prefix: '/v1/account' });
+    await authenticatedApp.register(anchorsRoutes, { prefix: '/v1/anchors' });
+  });
+};
+```
+
+---
+
+### Story 15: Docker Setup
+**Files:**
+- `packages/api/Dockerfile`
+- `docker-compose.yml` (update)
+
+**Dockerfile:**
+```dockerfile
+FROM node:20-alpine AS base
+RUN corepack enable
+
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/core/package.json ./packages/core/
+COPY packages/api/package.json ./packages/api/
+RUN pnpm install --frozen-lockfile
+
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/packages/core/node_modules ./packages/core/node_modules
+COPY --from=deps /app/packages/api/node_modules ./packages/api/node_modules
+COPY . .
+RUN pnpm turbo build --filter=@memstamp/api
+
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 memstamp
+COPY --from=builder --chown=memstamp:nodejs /app/packages/api/dist ./dist
+COPY --from=builder --chown=memstamp:nodejs /app/packages/api/drizzle ./drizzle
+COPY --from=builder --chown=memstamp:nodejs /app/packages/api/package.json ./
+USER memstamp
+EXPOSE 8010
+CMD ["node", "dist/index.js"]
+```
+
+**Verify:**
+```bash
+docker compose build api
+docker compose up -d
+curl http://localhost:8010/health
 ```
 
 ---
 
 ## Completion Criteria
 
-- [ ] All 14 stories implemented
-- [ ] All tests pass
-- [ ] TypeScript strict mode, zero errors
-- [ ] Package builds successfully
-- [ ] No external dependencies for core hashing (crypto is Node built-in)
-- [ ] Total core library < 1,000 LoC (excluding tests)
+- [ ] All 15 stories implemented
+- [ ] Database schema created and migrations work
+- [ ] API key authentication functional
+- [ ] Health endpoint returns database/redis status
+- [ ] Error handling consistent
+- [ ] Swagger UI accessible at /docs
+- [ ] Docker build succeeds
+- [ ] All TypeScript strict, no errors
