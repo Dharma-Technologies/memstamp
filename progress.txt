@@ -13,3 +13,15 @@
 - Existing tests pass (hash.test.ts — 7 tests)
 - TypeScript strict mode compiles cleanly
 ---
+
+## 2026-02-18 - P11-01-12 - VCOT Event Creation Helper
+- Implemented `createVCOTEvent()` in `packages/core/src/event.ts`
+- Inline UUIDv7 generation using Node.js `crypto.randomBytes`
+- Updated `packages/core/src/index.ts` to export from `./event`
+- Files changed: `packages/core/src/event.ts` (new), `packages/core/src/index.ts`
+- **Learnings for future iterations:**
+  - UUIDv7 is implemented inline (no external dep) — 48-bit ms timestamp + random, version 7 nibble, variant 10xx
+  - `@noble/ed25519` uses async APIs (`signAsync`, `verifyAsync`, `getPublicKeyAsync`)
+  - Schema validates `event_id` as UUID format — UUIDv7 is compatible
+  - `computeEventHash` uses pipe-delimited fields: `event_id|event_type|timestamp|agent_id|content_hash|previous_hash`
+---

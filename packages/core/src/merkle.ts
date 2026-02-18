@@ -60,12 +60,15 @@ export function generateMerkleProof(
     const isRightNode = currentIndex % 2 === 1;
     const siblingIndex = isRightNode ? currentIndex - 1 : currentIndex + 1;
 
-    if (siblingIndex < currentLevel.length) {
-      proof.push({
-        hash: currentLevel[siblingIndex],
-        position: isRightNode ? 'left' : 'right',
-      });
-    }
+    // When sibling doesn't exist (odd count), use self (duplication)
+    const siblingHash =
+      siblingIndex < currentLevel.length
+        ? currentLevel[siblingIndex]
+        : currentLevel[currentIndex];
+    proof.push({
+      hash: siblingHash,
+      position: isRightNode ? 'left' : 'right',
+    });
 
     // Move to parent level
     const nextLevel: string[] = [];

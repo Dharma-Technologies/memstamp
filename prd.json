@@ -73,13 +73,13 @@
       "id": "P11-01-12",
       "title": "VCOT Event Creation Helper",
       "file": "packages/core/src/event.ts",
-      "passes": false
+      "passes": true
     },
     {
       "id": "P11-01-13",
       "title": "Package Build & Exports",
       "file": "packages/core/src/index.ts",
-      "passes": false
+      "passes": true
     },
     {
       "id": "P11-01-14",
