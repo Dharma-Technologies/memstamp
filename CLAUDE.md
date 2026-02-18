@@ -269,613 +269,568 @@ EVM_PRIVATE_KEY=xxx     # 0x prefixed
 
 ---
 
-## Current Stage: P11-02-api-foundation
+## Current Stage: P11-03-stamp-lifecycle
 
-# P11-02: API Foundation
+# P11-03: Stamp Lifecycle
 
-**Phase 2 — API Server Setup**
+**Phase 3 — Stamp CRUD & Status Management**
 
-Build the Fastify API server with database models, authentication, and foundational endpoints.
+Implement stamp ingestion, storage, querying, and status tracking.
 
 ---
 
 ## Stories
 
-### Story 1: Fastify Server Setup
-**File:** `packages/api/src/index.ts`
+### Story 1: Create Stamp Endpoint
+**File:** `packages/api/src/routes/stamps.ts`
 
-Set up the Fastify server with essential plugins.
+Implement `POST /v1/stamps` to create a single stamp.
 
-**Plugins to configure:**
-- `@fastify/cors` — CORS headers
-- `@fastify/helmet` — Security headers
-- `@fastify/rate-limit` — Rate limiting
-- `@fastify/swagger` — OpenAPI generation
-- `@fastify/swagger-ui` — Swagger UI
-
-**Configuration:**
+**Request:**
 ```typescript
-const app = Fastify({
-  logger: {
-    level: config.nodeEnv === 'production' ? 'info' : 'debug',
-  },
-});
-
-// CORS
-await app.register(cors, {
-  origin: config.corsOrigins,
-});
-
-// Security headers
-await app.register(helmet);
-
-// Rate limiting
-await app.register(rateLimit, {
-  max: 100,
-  timeWindow: '1 minute',
-});
-
-// Swagger
-await app.register(swagger, {
-  openapi: {
-    info: {
-      title: 'memstamp API',
-      version: '0.1.0',
-    },
-    servers: [{ url: config.apiUrl }],
-    components: {
-      securitySchemes: {
-        apiKey: {
-          type: 'apiKey',
-          name: 'Authorization',
-          in: 'header',
-        },
-      },
-    },
-  },
-});
-
-await app.register(swaggerUi, {
-  routePrefix: '/docs',
-});
+{
+  agent_id: string;
+  event_type: VCOTEventType;
+  content_hash: string;      // sha256:xxx
+  previous_hash?: string;    // Optional - auto-fetch if not provided
+  framework: string;
+  signature: string;
+  metadata?: Record<string, unknown>;
+}
 ```
+
+**Response:**
+```typescript
+{
+  id: string;
+  event_id: string;
+  agent_id: string;
+  event_type: string;
+  content_hash: string;
+  previous_hash: string;
+  status: 'pending';
+  created_at: string;
+}
+```
+
+**Logic:**
+1. Validate request with Zod
+2. If `previous_hash` not provided, fetch latest stamp for agent_id
+3. Generate event_id (UUIDv7)
+4. Insert stamp with status='pending'
+5. Deduct 1 credit (based on chain)
+6. Add to anchor queue
+7. Return stamp
+
+**Errors:**
+- 400: Invalid request
+- 401: Unauthorized
+- 402: Insufficient credits
 
 ---
 
-### Story 2: Configuration Module
-**File:** `packages/api/src/config.ts`
+### Story 2: Batch Create Stamps Endpoint
+**File:** `packages/api/src/routes/stamps.ts`
 
-Create typed configuration from environment variables.
+Implement `POST /v1/stamps/batch` for bulk stamp creation.
 
-**Config structure:**
+**Request:**
 ```typescript
-import { z } from 'zod';
-
-const envSchema = z.object({
-  PORT: z.string().default('8010'),
-  NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
-  DATABASE_URL: z.string().url(),
-  REDIS_URL: z.string().url(),
-  JWT_SECRET: z.string().min(32),
-  API_URL: z.string().url().default('http://localhost:8010'),
-  CORS_ORIGINS: z.string().default('*'),
-  
-  // Chain configuration
-  HELIUS_API_KEY: z.string().optional(),
-  ALCHEMY_API_KEY: z.string().optional(),
-  SOLANA_RPC_URL: z.string().url().optional(),
-  SOLANA_PRIVATE_KEY: z.string().optional(),
-  BASE_RPC_URL: z.string().url().optional(),
-  EVM_PRIVATE_KEY: z.string().optional(),
-  
-  // Anchoring
-  ANCHOR_BATCH_SIZE: z.string().default('1000'),
-  ANCHOR_TIME_WINDOW_MS: z.string().default('300000'),
-  DEFAULT_CHAIN: z.string().default('solana'),
-});
-
-export const config = envSchema.parse(process.env);
+{
+  stamps: Array<CreateStampRequest>;  // Max 1000
+}
 ```
 
-**Error handling:**
-- If validation fails, log missing/invalid vars and exit
+**Response:**
+```typescript
+{
+  created: number;
+  stamps: Array<{
+    id: string;
+    event_id: string;
+    content_hash: string;
+    status: 'pending';
+  }>;
+  credits_used: number;
+}
+```
+
+**Logic:**
+1. Validate all stamps
+2. Check total credit requirement
+3. Insert all stamps in transaction
+4. Deduct credits
+5. Add batch to anchor queue
+6. Return summary
+
+**Optimizations:**
+- Use batch insert
+- Single credit transaction
+- Group by agent_id for chain linking
 
 ---
 
-### Story 3: Database Connection (Drizzle)
-**File:** `packages/api/src/database/connection.ts`
+### Story 3: Get Stamp Endpoint
+**File:** `packages/api/src/routes/stamps.ts`
 
-Set up Drizzle ORM with PostgreSQL.
+Implement `GET /v1/stamps/:id`.
 
-**Dependencies:**
-- `drizzle-orm`
-- `pg`
-- `drizzle-kit` (dev)
-
-**Connection:**
+**Response:**
 ```typescript
-import { drizzle } from 'drizzle-orm/node-postgres';
-import { Pool } from 'pg';
-import * as schema from './schema';
-
-const pool = new Pool({
-  connectionString: config.databaseUrl,
-});
-
-export const db = drizzle(pool, { schema });
+{
+  id: string;
+  event_id: string;
+  agent_id: string;
+  event_type: string;
+  content_hash: string;
+  previous_hash: string;
+  framework: string;
+  signature: string;
+  status: 'pending' | 'anchored' | 'verified';
+  anchor_id?: string;
+  merkle_index?: number;
+  created_at: string;
+  anchored_at?: string;
+}
 ```
 
-**drizzle.config.ts:**
-```typescript
-import type { Config } from 'drizzle-kit';
-
-export default {
-  schema: './src/database/schema.ts',
-  out: './drizzle',
-  driver: 'pg',
-  dbCredentials: {
-    connectionString: process.env.DATABASE_URL!,
-  },
-} satisfies Config;
-```
+**Logic:**
+1. Fetch stamp by ID
+2. Verify stamp belongs to account
+3. Return stamp with anchor info if anchored
 
 ---
 
-### Story 4: Database Schema — Accounts
-**File:** `packages/api/src/database/schema.ts`
+### Story 4: List Agent Stamps Endpoint
+**File:** `packages/api/src/routes/stamps.ts`
 
-Define the accounts table.
+Implement `GET /v1/agents/:agent_id/stamps`.
 
+**Query params:**
+- `limit` — Max results (default 50, max 100)
+- `offset` — Pagination offset
+- `status` — Filter by status
+- `from` — Start timestamp
+- `to` — End timestamp
+
+**Response:**
 ```typescript
-import { pgTable, uuid, text, integer, timestamp, pgEnum } from 'drizzle-orm/pg-core';
-
-export const tierEnum = pgEnum('tier', ['free', 'pro', 'enterprise']);
-
-export const accounts = pgTable('accounts', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  email: text('email').notNull().unique(),
-  apiKeyHash: text('api_key_hash').notNull().unique(),
-  apiKeyPrefix: text('api_key_prefix').notNull(), // First 8 chars for identification
-  credits: integer('credits').notNull().default(500), // Free tier starts with 500
-  tier: tierEnum('tier').notNull().default('free'),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-  updatedAt: timestamp('updated_at').notNull().defaultNow(),
-});
+{
+  stamps: Array<Stamp>;
+  total: number;
+  limit: number;
+  offset: number;
+}
 ```
+
+**Logic:**
+1. Verify account owns stamps for agent_id
+2. Apply filters
+3. Return paginated results
+4. Include total count for pagination
 
 ---
 
-### Story 5: Database Schema — Stamps
-**File:** `packages/api/src/database/schema.ts`
+### Story 5: Get Audit Trail Endpoint
+**File:** `packages/api/src/routes/stamps.ts`
 
-Define the stamps table.
+Implement `GET /v1/agents/:agent_id/trail`.
 
+Returns stamps in order with hash chain validation status.
+
+**Response:**
 ```typescript
-export const stampStatusEnum = pgEnum('stamp_status', ['pending', 'anchored', 'verified']);
-
-export const stamps = pgTable('stamps', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  accountId: uuid('account_id').notNull().references(() => accounts.id),
-  eventId: text('event_id').notNull().unique(),
-  agentId: text('agent_id').notNull(),
-  eventType: text('event_type').notNull(),
-  contentHash: text('content_hash').notNull(),
-  previousHash: text('previous_hash').notNull(),
-  framework: text('framework').notNull(),
-  signature: text('signature').notNull(),
-  status: stampStatusEnum('status').notNull().default('pending'),
-  anchorId: uuid('anchor_id').references(() => anchors.id),
-  merkleIndex: integer('merkle_index'), // Position in Merkle tree
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-}, (table) => ({
-  agentIdIdx: index('stamps_agent_id_idx').on(table.agentId),
-  accountIdIdx: index('stamps_account_id_idx').on(table.accountId),
-  statusIdx: index('stamps_status_idx').on(table.status),
-  createdAtIdx: index('stamps_created_at_idx').on(table.createdAt),
-}));
+{
+  agent_id: string;
+  stamps: Array<{
+    id: string;
+    event_id: string;
+    content_hash: string;
+    previous_hash: string;
+    timestamp: string;
+    chain_valid: boolean;  // Hash chain intact to this point
+  }>;
+  chain_integrity: 'valid' | 'broken' | 'incomplete';
+  first_stamp: string;    // Timestamp
+  last_stamp: string;     // Timestamp
+  total_stamps: number;
+}
 ```
+
+**Logic:**
+1. Fetch all stamps for agent in order
+2. Validate hash chain
+3. Flag any breaks
+4. Return trail with integrity status
 
 ---
 
-### Story 6: Database Schema — Anchors
-**File:** `packages/api/src/database/schema.ts`
+### Story 6: Gap Detection Endpoint
+**File:** `packages/api/src/routes/stamps.ts`
 
-Define the anchors table.
+Implement `GET /v1/agents/:agent_id/gaps`.
 
+Detect time periods with no stamps (potential selective stamping).
+
+**Query params:**
+- `threshold_minutes` — Gap threshold (default 60)
+- `from` — Start timestamp
+- `to` — End timestamp
+
+**Response:**
 ```typescript
-export const anchorStatusEnum = pgEnum('anchor_status', ['pending', 'confirmed', 'finalized']);
-
-export const anchors = pgTable('anchors', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  merkleRoot: text('merkle_root').notNull().unique(),
-  eventCount: integer('event_count').notNull(),
-  startTime: timestamp('start_time').notNull(),
-  endTime: timestamp('end_time').notNull(),
-  chain: text('chain').notNull(), // solana, base, bitcoin, etc.
-  txHash: text('tx_hash'),
-  blockNumber: integer('block_number'),
-  status: anchorStatusEnum('status').notNull().default('pending'),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-}, (table) => ({
-  merkleRootIdx: index('anchors_merkle_root_idx').on(table.merkleRoot),
-  chainIdx: index('anchors_chain_idx').on(table.chain),
-  statusIdx: index('anchors_status_idx').on(table.status),
-}));
+{
+  agent_id: string;
+  gaps: Array<{
+    start: string;
+    end: string;
+    duration_minutes: number;
+  }>;
+  gap_count: number;
+  analyzed_period: {
+    start: string;
+    end: string;
+  };
+  average_stamp_interval_minutes: number;
+}
 ```
+
+**Logic:**
+1. Fetch stamps in time range
+2. Calculate intervals between stamps
+3. Flag intervals exceeding threshold
+4. Calculate statistics
 
 ---
 
-### Story 7: Database Schema — Credit Transactions
-**File:** `packages/api/src/database/schema.ts`
+### Story 7: Verify Stamp Endpoint (Authenticated)
+**File:** `packages/api/src/routes/stamps.ts`
 
-Define the credit transactions table.
+Implement `GET /v1/stamps/:id/verify`.
 
+Full verification including chain lookup.
+
+**Response:**
 ```typescript
-export const creditTypeEnum = pgEnum('credit_type', ['purchase', 'deduct', 'refund', 'bonus']);
-
-export const creditTransactions = pgTable('credit_transactions', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  accountId: uuid('account_id').notNull().references(() => accounts.id),
-  amount: integer('amount').notNull(), // Positive for credits, negative for debits
-  type: creditTypeEnum('type').notNull(),
-  reason: text('reason').notNull(),
-  stampId: uuid('stamp_id').references(() => stamps.id), // Optional reference
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-}, (table) => ({
-  accountIdIdx: index('credit_tx_account_id_idx').on(table.accountId),
-}));
+{
+  verified: boolean;
+  stamp_id: string;
+  content_hash: string;
+  merkle_root?: string;
+  merkle_proof?: MerkleProof;
+  anchor?: {
+    id: string;
+    chain: string;
+    tx_hash: string;
+    block_number?: number;
+    status: string;
+  };
+  chain_verified: boolean;
+  signature_verified: boolean;
+  hash_chain_valid: boolean;
+  error?: string;
+}
 ```
+
+**Logic:**
+1. Fetch stamp
+2. Get anchor if anchored
+3. Generate Merkle proof
+4. Verify signature
+5. Verify hash chain
+6. Check chain (if anchored)
+7. Return full verification result
 
 ---
 
-### Story 8: Generate Initial Migration
-**Command:** Run Drizzle migration generation
+### Story 8: Get Merkle Proof Endpoint
+**File:** `packages/api/src/routes/stamps.ts`
 
-```bash
-cd packages/api
-pnpm db:generate
+Implement `GET /v1/stamps/:id/proof`.
+
+**Response:**
+```typescript
+{
+  stamp_id: string;
+  leaf: string;
+  proof: Array<{
+    hash: string;
+    position: 'left' | 'right';
+  }>;
+  root: string;
+  anchor_id: string;
+  chain: string;
+  tx_hash?: string;
+}
 ```
 
-**Verify:**
-- Migration file created in `drizzle/` directory
-- Migration includes all tables and indexes
-- Enums created before tables
+**Logic:**
+1. Fetch stamp
+2. Verify stamp is anchored
+3. Fetch all stamps in same anchor batch
+4. Generate Merkle proof
+5. Return proof with anchor info
 
 ---
 
-### Story 9: API Key Authentication Middleware
-**File:** `packages/api/src/middleware/auth.ts`
+### Story 9: Stamp Service Layer
+**File:** `packages/api/src/services/stamps.ts`
 
-Implement API key authentication.
-
-**API Key Format:** `ms_live_<random32chars>` or `ms_test_<random32chars>`
+Create service layer for stamp operations.
 
 **Functions:**
 ```typescript
-import { createHash } from 'crypto';
-
-// Hash API key for storage
-export function hashApiKey(apiKey: string): string {
-  return createHash('sha256').update(apiKey).digest('hex');
-}
-
-// Extract prefix (for identification without exposing full key)
-export function getApiKeyPrefix(apiKey: string): string {
-  return apiKey.substring(0, 8);
-}
-
-// Generate new API key
-export function generateApiKey(isTest: boolean = false): string {
-  const prefix = isTest ? 'ms_test_' : 'ms_live_';
-  const random = crypto.randomBytes(24).toString('base64url');
-  return `${prefix}${random}`;
-}
-```
-
-**Middleware:**
-```typescript
-export const authMiddleware: FastifyPluginAsync = async (app) => {
-  app.addHook('onRequest', async (request, reply) => {
-    const authHeader = request.headers.authorization;
-    
-    if (!authHeader?.startsWith('Bearer ')) {
-      throw app.httpErrors.unauthorized('Missing API key');
-    }
-    
-    const apiKey = authHeader.substring(7);
-    const hash = hashApiKey(apiKey);
-    
-    const account = await db.query.accounts.findFirst({
-      where: eq(accounts.apiKeyHash, hash),
-    });
-    
-    if (!account) {
-      throw app.httpErrors.unauthorized('Invalid API key');
-    }
-    
-    request.account = account;
-  });
-};
-```
-
-**TypeScript declaration:**
-```typescript
-declare module 'fastify' {
-  interface FastifyRequest {
-    account: typeof accounts.$inferSelect;
-  }
-}
-```
-
----
-
-### Story 10: Health Check Endpoint
-**File:** `packages/api/src/routes/health.ts`
-
-Implement health check endpoint.
-
-```typescript
-export const healthRoutes: FastifyPluginAsync = async (app) => {
-  app.get('/health', {
-    schema: {
-      response: {
-        200: {
-          type: 'object',
-          properties: {
-            status: { type: 'string' },
-            timestamp: { type: 'string' },
-            database: { type: 'string' },
-            redis: { type: 'string' },
-          },
-        },
-      },
-    },
-  }, async () => {
-    // Check database
-    let dbStatus = 'ok';
-    try {
-      await db.execute(sql`SELECT 1`);
-    } catch {
-      dbStatus = 'error';
-    }
-    
-    // Check Redis
-    let redisStatus = 'ok';
-    try {
-      await redis.ping();
-    } catch {
-      redisStatus = 'error';
-    }
-    
-    return {
-      status: dbStatus === 'ok' && redisStatus === 'ok' ? 'ok' : 'degraded',
-      timestamp: new Date().toISOString(),
-      database: dbStatus,
-      redis: redisStatus,
-    };
-  });
-};
-```
-
----
-
-### Story 11: Redis Connection
-**File:** `packages/api/src/services/redis.ts`
-
-Set up Redis connection with IORedis.
-
-```typescript
-import IORedis from 'ioredis';
-import { config } from '../config';
-
-export const redis = new IORedis(config.redisUrl, {
-  maxRetriesPerRequest: null, // Required for BullMQ
-  enableReadyCheck: false,
-});
-
-redis.on('error', (err) => {
-  console.error('Redis error:', err);
-});
-
-redis.on('connect', () => {
-  console.log('Redis connected');
-});
-```
-
----
-
-### Story 12: Error Handling
-**File:** `packages/api/src/errors.ts`
-
-Define custom error types and error handler.
-
-```typescript
-export class AppError extends Error {
-  constructor(
-    message: string,
-    public statusCode: number = 500,
-    public code: string = 'INTERNAL_ERROR'
-  ) {
-    super(message);
-    this.name = 'AppError';
-  }
-}
-
-export class ValidationError extends AppError {
-  constructor(message: string, public errors?: string[]) {
-    super(message, 400, 'VALIDATION_ERROR');
-  }
-}
-
-export class AuthenticationError extends AppError {
-  constructor(message: string = 'Authentication required') {
-    super(message, 401, 'AUTHENTICATION_ERROR');
-  }
-}
-
-export class InsufficientCreditsError extends AppError {
-  constructor(required: number, available: number) {
-    super(`Insufficient credits. Required: ${required}, Available: ${available}`, 402, 'INSUFFICIENT_CREDITS');
-  }
-}
-
-export class NotFoundError extends AppError {
-  constructor(resource: string) {
-    super(`${resource} not found`, 404, 'NOT_FOUND');
-  }
-}
-```
-
-**Error handler plugin:**
-```typescript
-export const errorHandler: FastifyPluginAsync = async (app) => {
-  app.setErrorHandler((error, request, reply) => {
-    if (error instanceof AppError) {
-      return reply.status(error.statusCode).send({
-        error: error.code,
-        message: error.message,
-        ...(error instanceof ValidationError && error.errors ? { errors: error.errors } : {}),
-      });
-    }
-    
-    // Log unexpected errors
-    request.log.error(error);
-    
-    return reply.status(500).send({
-      error: 'INTERNAL_ERROR',
-      message: 'An unexpected error occurred',
-    });
-  });
-};
-```
-
----
-
-### Story 13: Request Validation with Zod
-**File:** `packages/api/src/schemas/index.ts`
-
-Define Zod schemas for request validation.
-
-```typescript
-import { z } from 'zod';
-
-// Common schemas
-export const uuidSchema = z.string().uuid();
-export const hashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
-export const eventTypeSchema = z.enum([
-  'decision', 'tool_call', 'tool_result', 'memory_write',
-  'memory_read', 'external_action', 'state_change', 'observation', 'custom'
-]);
-
-// Pagination
-export const paginationSchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  offset: z.coerce.number().int().min(0).default(0),
-});
-
-// Create stamp request
-export const createStampSchema = z.object({
-  agent_id: z.string().min(1).max(256),
-  event_type: eventTypeSchema,
-  content_hash: hashSchema,
-  previous_hash: hashSchema.optional(),
-  framework: z.string().min(1).max(64).default('unknown'),
-  signature: z.string().min(1),
-  metadata: z.record(z.unknown()).optional(),
-});
-
-// Batch create stamps
-export const batchCreateStampsSchema = z.object({
-  stamps: z.array(createStampSchema).min(1).max(1000),
-});
-```
-
----
-
-### Story 14: Route Registration
-**File:** `packages/api/src/routes/index.ts`
-
-Set up route registration with prefixes.
-
-```typescript
-import { FastifyPluginAsync } from 'fastify';
-import { healthRoutes } from './health';
-import { stampsRoutes } from './stamps';
-import { accountRoutes } from './account';
-import { anchorsRoutes } from './anchors';
-import { publicRoutes } from './public';
-
-export const registerRoutes: FastifyPluginAsync = async (app) => {
-  // Public routes (no auth)
-  await app.register(healthRoutes);
-  await app.register(publicRoutes, { prefix: '/v1' });
+export class StampService {
+  // Create single stamp
+  async create(accountId: string, input: CreateStampInput): Promise<Stamp>
   
-  // Authenticated routes
-  await app.register(async (authenticatedApp) => {
-    await authenticatedApp.register(authMiddleware);
-    await authenticatedApp.register(stampsRoutes, { prefix: '/v1/stamps' });
-    await authenticatedApp.register(accountRoutes, { prefix: '/v1/account' });
-    await authenticatedApp.register(anchorsRoutes, { prefix: '/v1/anchors' });
-  });
-};
+  // Create batch of stamps
+  async createBatch(accountId: string, stamps: CreateStampInput[]): Promise<Stamp[]>
+  
+  // Get stamp by ID
+  async getById(id: string, accountId: string): Promise<Stamp | null>
+  
+  // List stamps for agent
+  async listByAgent(
+    agentId: string,
+    accountId: string,
+    options: ListOptions
+  ): Promise<{ stamps: Stamp[]; total: number }>
+  
+  // Get audit trail
+  async getAuditTrail(agentId: string, accountId: string): Promise<AuditTrail>
+  
+  // Detect gaps
+  async detectGaps(
+    agentId: string,
+    accountId: string,
+    thresholdMinutes: number
+  ): Promise<GapReport>
+  
+  // Get latest stamp for agent (for chaining)
+  async getLatestForAgent(agentId: string, accountId: string): Promise<Stamp | null>
+  
+  // Update stamp status
+  async updateStatus(
+    stampIds: string[],
+    status: StampStatus,
+    anchorId?: string
+  ): Promise<void>
+}
 ```
 
 ---
 
-### Story 15: Docker Setup
-**Files:**
-- `packages/api/Dockerfile`
-- `docker-compose.yml` (update)
+### Story 10: Hash Chain Validation Service
+**File:** `packages/api/src/services/chain-validation.ts`
 
-**Dockerfile:**
-```dockerfile
-FROM node:20-alpine AS base
-RUN corepack enable
+Service for validating hash chains.
 
-FROM base AS deps
-WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY packages/core/package.json ./packages/core/
-COPY packages/api/package.json ./packages/api/
-RUN pnpm install --frozen-lockfile
+**Functions:**
+```typescript
+export class ChainValidationService {
+  // Validate entire chain for an agent
+  async validateChain(
+    agentId: string,
+    accountId: string
+  ): Promise<ChainValidationResult>
+  
+  // Validate signature on a stamp
+  async validateSignature(
+    stamp: Stamp,
+    publicKey: string
+  ): Promise<boolean>
+  
+  // Find chain breaks
+  async findChainBreaks(
+    stamps: Stamp[]
+  ): Promise<ChainBreak[]>
+}
 
-FROM base AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/packages/core/node_modules ./packages/core/node_modules
-COPY --from=deps /app/packages/api/node_modules ./packages/api/node_modules
-COPY . .
-RUN pnpm turbo build --filter=@memstamp/api
+interface ChainValidationResult {
+  valid: boolean;
+  total_stamps: number;
+  breaks: ChainBreak[];
+  first_break_at?: string;
+}
 
-FROM base AS runner
-WORKDIR /app
-ENV NODE_ENV=production
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 memstamp
-COPY --from=builder --chown=memstamp:nodejs /app/packages/api/dist ./dist
-COPY --from=builder --chown=memstamp:nodejs /app/packages/api/drizzle ./drizzle
-COPY --from=builder --chown=memstamp:nodejs /app/packages/api/package.json ./
-USER memstamp
-EXPOSE 8010
-CMD ["node", "dist/index.js"]
+interface ChainBreak {
+  stamp_id: string;
+  expected_previous: string;
+  actual_previous: string;
+  position: number;
+}
 ```
 
-**Verify:**
-```bash
-docker compose build api
-docker compose up -d
-curl http://localhost:8010/health
+---
+
+### Story 11: Anchor Queue Integration
+**File:** `packages/api/src/services/queue.ts`
+
+Set up BullMQ queue for anchor jobs.
+
+**Queues:**
+```typescript
+import { Queue } from 'bullmq';
+import { redis } from './redis';
+
+export const anchorQueue = new Queue('anchor', {
+  connection: redis,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 1000,
+    },
+  },
+});
+
+// Add stamp to anchor queue
+export async function queueForAnchoring(stampIds: string[]): Promise<void> {
+  await anchorQueue.add('anchor-batch', { stampIds }, {
+    delay: config.anchorTimeWindowMs,  // Wait for batch window
+  });
+}
+
+// Add immediate anchor job (for single high-priority stamps)
+export async function queueImmediateAnchor(stampId: string): Promise<void> {
+  await anchorQueue.add('anchor-immediate', { stampId }, {
+    priority: 1,
+  });
+}
 ```
+
+---
+
+### Story 12: Stamp Status Transitions
+**File:** `packages/api/src/services/stamps.ts`
+
+Implement status transition logic.
+
+**States:**
+1. `pending` — Created, waiting for anchoring
+2. `anchored` — Included in Merkle tree, submitted to chain
+3. `verified` — Chain transaction confirmed/finalized
+
+**Transitions:**
+- `pending` → `anchored` (when batch submitted)
+- `anchored` → `verified` (when chain confirms)
+- No backward transitions
+
+**Update function:**
+```typescript
+async function transitionStatus(
+  stampId: string,
+  from: StampStatus,
+  to: StampStatus,
+  anchorId?: string
+): Promise<boolean> {
+  const result = await db.update(stamps)
+    .set({ 
+      status: to, 
+      anchorId,
+      ...(to === 'anchored' ? { anchoredAt: new Date() } : {})
+    })
+    .where(
+      and(
+        eq(stamps.id, stampId),
+        eq(stamps.status, from)
+      )
+    )
+    .returning();
+  
+  return result.length > 0;
+}
+```
+
+---
+
+### Story 13: Stamp Repository
+**File:** `packages/api/src/repositories/stamps.ts`
+
+Database access layer for stamps.
+
+```typescript
+export class StampRepository {
+  // Insert stamp
+  async insert(data: NewStamp): Promise<Stamp>
+  
+  // Insert batch
+  async insertBatch(data: NewStamp[]): Promise<Stamp[]>
+  
+  // Find by ID
+  async findById(id: string): Promise<Stamp | null>
+  
+  // Find by event ID
+  async findByEventId(eventId: string): Promise<Stamp | null>
+  
+  // Find by account
+  async findByAccount(
+    accountId: string,
+    options: QueryOptions
+  ): Promise<Stamp[]>
+  
+  // Find by agent
+  async findByAgent(
+    agentId: string,
+    accountId: string,
+    options: QueryOptions
+  ): Promise<Stamp[]>
+  
+  // Find pending stamps for anchoring
+  async findPendingForAnchoring(
+    chain: string,
+    limit: number
+  ): Promise<Stamp[]>
+  
+  // Update status
+  async updateStatus(
+    ids: string[],
+    status: StampStatus,
+    anchorId?: string
+  ): Promise<number>
+  
+  // Count by agent
+  async countByAgent(
+    agentId: string,
+    accountId: string
+  ): Promise<number>
+}
+```
+
+---
+
+### Story 14: Tests for Stamp Endpoints
+**File:** `packages/api/tests/stamps.test.ts`
+
+Integration tests for stamp endpoints.
+
+**Test scenarios:**
+1. Create stamp successfully
+2. Create stamp without credits fails
+3. Batch create stamps
+4. Get stamp by ID
+5. Get stamp not owned returns 404
+6. List stamps with pagination
+7. List stamps with filters
+8. Get audit trail
+9. Gap detection
+10. Verify stamp
+
+**Test setup:**
+- Create test account with API key
+- Create test stamps
+- Mock Redis/queue
 
 ---
 
 ## Completion Criteria
 
-- [ ] All 15 stories implemented
-- [ ] Database schema created and migrations work
-- [ ] API key authentication functional
-- [ ] Health endpoint returns database/redis status
-- [ ] Error handling consistent
-- [ ] Swagger UI accessible at /docs
-- [ ] Docker build succeeds
-- [ ] All TypeScript strict, no errors
+- [ ] All 14 stories implemented
+- [ ] All endpoints tested
+- [ ] Status transitions correct
+- [ ] Hash chain validation works
+- [ ] Gap detection works
+- [ ] Queue integration working
+- [ ] Pagination working
+- [ ] Error handling correct
