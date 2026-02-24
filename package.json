@@ -28,8 +28,10 @@
     "db:push": "pnpm --filter @memstamp/api db:push"
   },
   "devDependencies": {
+    "@solana/web3.js": "^1.90.0",
     "@types/node": "^20.11.0",
     "prettier": "^3.2.0",
+    "tsx": "^4.7.0",
     "turbo": "^2.0.0",
     "typescript": "^5.3.0"
   },
