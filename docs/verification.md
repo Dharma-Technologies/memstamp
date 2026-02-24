@@ -69,13 +69,15 @@ You can verify stamps without any memstamp software:
 ### 1. Get the stamp data
 
 ```bash
-curl https://api.memstamp.io/v1/stamps/stamp_abc123
+curl http://localhost:8010/v1/stamps/stamp_abc123
 ```
+
+> **Note:** Replace `localhost:8010` with your memstamp instance URL. A hosted version is coming — check the [GitHub repo](https://github.com/Dharma-Technologies/memstamp) for updates.
 
 ### 2. Get the Merkle proof
 
 ```bash
-curl https://api.memstamp.io/v1/stamps/stamp_abc123/proof
+curl http://localhost:8010/v1/stamps/stamp_abc123/proof
 ```
 
 ### 3. Verify on-chain

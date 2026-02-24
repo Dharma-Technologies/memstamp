@@ -2,7 +2,7 @@
 
 export const VCOT_SCHEMA_V1 = {
   $schema: 'http://json-schema.org/draft-07/schema#',
-  $id: 'https://memstamp.io/schemas/vcot-v1.json',
+  $id: 'https://github.com/Dharma-Technologies/memstamp/blob/main/schemas/vcot-v1.json',
   title: 'VCOT Event',
   type: 'object',
   required: [

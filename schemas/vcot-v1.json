@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://memstamp.io/schemas/vcot-v1.json",
+  "$id": "https://github.com/Dharma-Technologies/memstamp/blob/main/schemas/vcot-v1.json",
   "title": "VCOT Event Schema v0.1",
   "description": "Verifiable Chain of Thought (VCOT) event schema for AI agent audit trails",
   "type": "object",

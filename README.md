@@ -185,4 +185,4 @@ MIT — see [LICENSE](LICENSE)
 
 ---
 
-Built by [Dharma Technologies](https://dharmatech.ai)
+Built by [Dharma Technologies](https://github.com/Dharma-Technologies)

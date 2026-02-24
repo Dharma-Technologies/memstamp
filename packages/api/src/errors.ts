@@ -16,7 +16,7 @@ export function problemResponse(
   extensions?: ProblemExtensions
 ): FastifyReply {
   return reply.status(status).header('content-type', 'application/problem+json').send({
-    type: `https://memstamp.io/problems/${title.toLowerCase().replace(/\s+/g, '-')}`,
+    type: `https://github.com/Dharma-Technologies/memstamp/problems/${title.toLowerCase().replace(/\s+/g, '-')}`,
     title,
     status,
     detail,

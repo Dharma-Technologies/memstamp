@@ -1,6 +1,6 @@
 # memstamp-py
 
-Python SDK for [memstamp](https://memstamp.io) — verifiable audit trails for AI agents.
+Python SDK for [memstamp](https://github.com/Dharma-Technologies/memstamp) — verifiable audit trails for AI agents.
 
 ## Installation
 

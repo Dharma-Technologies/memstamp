@@ -5,12 +5,14 @@
 ## Base URL
 
 ```
-https://api.memstamp.io/v1
+http://localhost:8010/v1
 ```
+
+> **Note:** This assumes a self-hosted instance. A hosted version is coming — check the [GitHub repo](https://github.com/Dharma-Technologies/memstamp) for updates.
 
 ## Authentication
 
-All API requests require an API key in the `Authorization` header:
+API requests require an API key in the `Authorization` header:
 
 ```
 Authorization: Bearer ms_live_xxx
@@ -56,7 +58,7 @@ All errors follow RFC 7807 Problem Details:
 
 ```json
 {
-  "type": "https://memstamp.io/errors/invalid-hash",
+  "type": "https://github.com/Dharma-Technologies/memstamp/problems/invalid-hash",
   "title": "Invalid Content Hash",
   "status": 400,
   "detail": "Content hash must match pattern: sha256:[a-f0-9]{64}"
