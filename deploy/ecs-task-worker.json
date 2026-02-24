@@ -1,0 +1,45 @@
+{
+  "family": "memstamp-worker",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::role/memstampWorkerTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "memstamp-worker",
+      "image": "<AWS_ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com/memstamp-worker:latest",
+      "essential": true,
+      "environment": [
+        { "name": "NODE_ENV", "value": "production" }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:<AWS_ACCOUNT_ID>:secret:memstamp/database-url"
+        },
+        {
+          "name": "REDIS_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:<AWS_ACCOUNT_ID>:secret:memstamp/redis-url"
+        },
+        {
+          "name": "SOLANA_RPC_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:<AWS_ACCOUNT_ID>:secret:memstamp/solana-rpc-url"
+        },
+        {
+          "name": "SOLANA_PRIVATE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:<AWS_ACCOUNT_ID>:secret:memstamp/solana-private-key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/memstamp-worker",
+          "awslogs-region": "us-west-2",
+          "awslogs-stream-prefix": "worker"
+        }
+      }
+    }
+  ]
+}
