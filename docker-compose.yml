@@ -42,15 +42,12 @@ services:
       NODE_ENV: development
       DATABASE_URL: postgres://memstamp:memstamp_dev@postgres:5432/memstamp
       REDIS_URL: redis://redis:6379
-      PORT: 8010
+      PORT: "8010"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - ./packages/api/src:/app/packages/api/src:ro
-      - ./packages/core/src:/app/packages/core/src:ro
 
   worker:
     build:
@@ -61,14 +58,12 @@ services:
       NODE_ENV: development
       DATABASE_URL: postgres://memstamp:memstamp_dev@postgres:5432/memstamp
       REDIS_URL: redis://redis:6379
+      SOLANA_RPC_URL: https://api.devnet.solana.com
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - ./packages/worker/src:/app/packages/worker/src:ro
-      - ./packages/core/src:/app/packages/core/src:ro
 
 volumes:
   postgres_data:
