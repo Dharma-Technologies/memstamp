@@ -1,5 +1,4 @@
 // @memstamp/api — Fastify REST API Server
-// Placeholder - implementation in P11-02
 
 import Fastify from 'fastify';
 import { config } from './config.js';

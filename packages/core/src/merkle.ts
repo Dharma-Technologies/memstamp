@@ -1,5 +1,4 @@
 // Merkle tree implementation
-// Placeholder - implementation in P11-01
 
 import { createHash } from 'crypto';
 import type { MerkleNode, MerkleProof } from './types';

@@ -1,5 +1,4 @@
 // VCOT Schema validation
-// Placeholder - implementation in P11-01
 
 export const VCOT_SCHEMA_V1 = {
   $schema: 'http://json-schema.org/draft-07/schema#',

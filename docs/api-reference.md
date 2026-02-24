@@ -1,6 +1,6 @@
 # API Reference
 
-> Full API reference documentation — coming soon.
+> REST API for the memstamp anchoring service.
 
 ## Base URL
 

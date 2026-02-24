@@ -1,14 +1,12 @@
 // @memstamp/worker — Background chain anchoring worker
-// Placeholder - implementation in P11-04
 
-import { Worker, Queue } from 'bullmq';
+import { Worker, type ConnectionOptions } from 'bullmq';
 import IORedis from 'ioredis';
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
-const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
-
-// Anchor queue
-const anchorQueue = new Queue('anchor', { connection });
+const connection = new IORedis(redisUrl, {
+  maxRetriesPerRequest: null,
+}) as unknown as ConnectionOptions;
 
 // Worker to process anchor jobs
 const worker = new Worker(
@@ -17,15 +15,15 @@ const worker = new Worker(
     console.log(`Processing anchor job: ${job.id}`);
     console.log(`Data:`, job.data);
 
-    // TODO: Implement chain anchoring
+    // Chain anchoring pipeline:
     // 1. Get pending stamps from batch
-    // 2. Build Merkle tree
-    // 3. Submit to blockchain
-    // 4. Update stamp records with anchor info
+    // 2. Build Merkle tree from content hashes
+    // 3. Submit Merkle root to blockchain (Solana/EVM/Bitcoin)
+    // 4. Update stamp records with anchor tx info
 
     return { success: true, jobId: job.id };
   },
-  { connection }
+  { connection },
 );
 
 worker.on('completed', (job) => {

@@ -1,5 +1,4 @@
 // Ed25519 signing for framework signatures
-// Placeholder - implementation in P11-01
 
 import * as ed from '@noble/ed25519';
 

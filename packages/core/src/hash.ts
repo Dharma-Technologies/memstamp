@@ -1,5 +1,4 @@
 // SHA-256 hashing with canonical JSON
-// Placeholder - implementation in P11-01
 
 import { createHash } from 'crypto';
 

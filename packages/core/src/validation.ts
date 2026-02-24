@@ -1,5 +1,4 @@
 // VCOT Event validation
-// Placeholder - implementation in P11-01
 
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
