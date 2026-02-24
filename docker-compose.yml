@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -9,9 +7,10 @@ services:
       POSTGRES_PASSWORD: memstamp_dev
       POSTGRES_DB: memstamp
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./packages/api/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U memstamp"]
       interval: 5s
@@ -37,7 +36,7 @@ services:
       dockerfile: packages/api/Dockerfile
     container_name: memstamp-api
     ports:
-      - "8010:8010"
+      - "18010:8010"
     environment:
       NODE_ENV: development
       DATABASE_URL: postgres://memstamp:memstamp_dev@postgres:5432/memstamp
