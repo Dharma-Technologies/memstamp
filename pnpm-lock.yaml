@@ -121,6 +121,9 @@ importers:
       '@solana/web3.js':
         specifier: ^1.90.0
         version: 1.98.4(typescript@5.9.3)
+      bs58:
+        specifier: ^4.0.1
+        version: 4.0.1
       bullmq:
         specifier: ^5.0.0
         version: 5.69.3
