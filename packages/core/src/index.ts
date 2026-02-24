@@ -1,5 +1,5 @@
 // @memstamp/core — VCOT Schema, Hashing, Merkle Trees
-// This is a placeholder. Implementation will be added in P11-01.
+
 
 export * from './types';
 export * from './schema';

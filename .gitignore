@@ -69,3 +69,7 @@ temp/
 *.pem
 *.key
 secrets/
+
+# Build artifacts
+prd.json
+progress.txt

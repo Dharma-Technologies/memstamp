@@ -1,5 +1,5 @@
 // API Configuration
-// Placeholder - implementation in P11-02
+
 
 export const config = {
   port: parseInt(process.env.PORT ?? '8010', 10),
